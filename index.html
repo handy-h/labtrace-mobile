@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Labtrace - 检查单数据管理</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- 顶部导航 -->
+        <header class="app-header">
+            <h1>Labtrace</h1>
+            <div class="header-actions">
+                <button id="btn-import" class="icon-btn" title="导入数据">📥</button>
+                <button id="btn-settings" class="icon-btn" title="设置">⚙️</button>
+            </div>
+        </header>
+
+        <!-- 标签页导航 -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="reports">📋 报告</button>
+            <button class="tab-btn" data-tab="trends">📈 趋势</button>
+            <button class="tab-btn" data-tab="search">🔍 检索</button>
+            <button class="tab-btn" data-tab="stats">📊 统计</button>
+        </nav>
+
+        <!-- 报告列表页 -->
+        <div id="tab-reports" class="tab-content active">
+            <div class="filter-bar">
+                <select id="filter-subject">
+                    <option value="">全部受检者</option>
+                </select>
+                <select id="filter-hospital">
+                    <option value="">全部医院</option>
+                </select>
+                <select id="filter-category">
+                    <option value="">全部类别</option>
+                </select>
+            </div>
+            <div id="reports-list" class="card-list"></div>
+        </div>
+
+        <!-- 趋势分析页 -->
+        <div id="tab-trends" class="tab-content">
+            <div class="filter-bar">
+                <select id="trend-subject">
+                    <option value="">选择受检者</option>
+                </select>
+                <select id="trend-item">
+                    <option value="">选择指标</option>
+                </select>
+            </div>
+            <div id="trend-chart-container">
+                <canvas id="trend-chart"></canvas>
+            </div>
+            <div id="trend-data" class="data-table"></div>
+        </div>
+
+        <!-- 数据检索页 -->
+        <div id="tab-search" class="tab-content">
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="搜索指标名称、医院、日期...">
+                <button id="btn-search">搜索</button>
+            </div>
+            <div class="filter-bar">
+                <input type="date" id="search-date-from" placeholder="开始日期">
+                <input type="date" id="search-date-to" placeholder="结束日期">
+            </div>
+            <div id="search-results" class="card-list"></div>
+        </div>
+
+        <!-- 统计分析页 -->
+        <div id="tab-stats" class="tab-content">
+            <div class="filter-bar">
+                <select id="stats-subject">
+                    <option value="">选择受检者</option>
+                </select>
+            </div>
+            <div id="stats-overview" class="stats-grid"></div>
+            <div id="stats-abnormal" class="card-list"></div>
+        </div>
+    </div>
+
+    <!-- 导入数据弹窗 -->
+    <div id="import-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>导入数据</h3>
+                <button class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="import-section">
+                    <h4>1. 导入数据库 (labtrace.db)</h4>
+                    <input type="file" id="import-db" accept="*/*" capture="environment">
+                    <p class="hint">选择 SQLite 数据库文件（.db / .sqlite），将覆盖现有数据</p>
+                </div>
+                <div class="import-section">
+                    <h4>2. 导入 PDF 文件</h4>
+                    <input type="file" id="import-pdfs" accept=".pdf" multiple>
+                    <p class="hint">选择检查单 PDF 文件（可选，可多选）</p>
+                </div>
+                <div id="import-status"></div>
+            </div>
+            <div class="modal-footer">
+                <button id="btn-confirm-import" class="btn-primary">确认导入</button>
+                <button class="btn-secondary close-btn">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PDF 查看弹窗 -->
+    <div id="pdf-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 id="pdf-title">检查单</h3>
+                <button class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <iframe id="pdf-viewer" frameborder="0"></iframe>
+            </div>
+        </div>
+    </div>
+
+    <!-- 报告详情弹窗 -->
+    <div id="report-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 id="report-title">报告详情</h3>
+                <button class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body" id="report-detail"></div>
+        </div>
+    </div>
+
+    <script src="js/database.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
