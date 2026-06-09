@@ -1,0 +1,51 @@
+{
+  "name": "labtrace-mobile",
+  "version": "1.0.0",
+  "description": "Labtrace Mobile - 检查单数据管理应用",
+  "main": "src/main/assets/js/app.js",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:verbose": "jest --verbose",
+    "test:database": "jest src/test/database.test.js",
+    "test:app": "jest src/test/app.test.js",
+    "test:integration": "jest src/test/integration.test.js"
+  },
+  "keywords": [
+    "health",
+    "medical",
+    "lab-reports",
+    "sqlite",
+    "android",
+    "webview"
+  ],
+  "author": "Labtrace Team",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-env": "^7.29.7",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.1",
+    "sql.js": "^1.10.3"
+  },
+  "jest": {
+    "testEnvironment": "jsdom",
+    "setupFilesAfterEnv": [
+      "<rootDir>/src/test/setup.js"
+    ],
+    "moduleNameMapper": {
+      "^sql\\.js$": "<rootDir>/src/test/__mocks__/sql-js.js"
+    },
+    "collectCoverageFrom": [
+      "src/main/assets/js/**/*.js",
+      "!src/main/assets/js/index.js"
+    ],
+    "coverageDirectory": "<rootDir>/coverage",
+    "verbose": true
+  }
+}
