@@ -33,14 +33,23 @@
 
 ```
 labtrace-mobile/
-├── index.html          # 主页面
-├── css/
-│   └── style.css       # 样式文件
-├── js/
-│   ├── database.js     # 数据库管理类
-│   └── app.js          # 应用逻辑
-├── assets/             # 静态资源（数据库模板等）
-└── README.md           # 本文件
+├── src/
+│   ├── main/
+│   │   ├── assets/           # Web 应用源码（唯一权威目录）
+│   │   │   ├── index.html    # 主页面
+│   │   │   ├── css/style.css # 样式文件
+│   │   │   ├── js/database.js# 数据库管理类
+│   │   │   └── js/app.js     # 应用逻辑
+│   │   └── java/             # Android WebView Activity
+│   └── test/                 # Jest 单元测试
+├── docs/
+│   ├── usage/                # PRD 产品需求文档
+│   ├── guides/               # 构建指南
+│   └── logs/                 # 任务日志
+├── labtrace-android/         # Cordova 备选构建方案
+├── build.gradle              # Gradle 构建配置
+├── package.json              # Node/Jest 配置
+└── AGENTS.md                 # Agent 工作指南
 ```
 
 ## 快速开始
@@ -68,7 +77,7 @@ cordova create labtrace-android com.labtrace.app Labtrace
 cd labtrace-android
 
 # 复制 web 文件到 www 目录
-cp -r ../labtrace-mobile/* www/
+cp -r ../src/main/assets/* www/
 
 # 添加 Android 平台
 cordova platform add android
@@ -82,26 +91,12 @@ cordova run android
 
 #### 方式 B: 使用 Android Studio (WebView)
 
-1. 创建新的 Android 项目
-2. 在 `assets/` 目录放入所有 web 文件
-3. 使用 WebView 加载 `file:///android_asset/index.html`
-4. 添加文件读写权限用于导入数据
+本项目已包含完整的 Android 项目结构：
 
-```kotlin
-// MainActivity.kt 示例
-class MainActivity : AppCompatActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-        
-        val webView = findViewById<WebView>(R.id.webview)
-        webView.settings.javaScriptEnabled = true
-        webView.settings.domStorageEnabled = true
-        webView.settings.allowFileAccess = true
-        webView.loadUrl("file:///android_asset/index.html")
-    }
-}
-```
+1. 用 Android Studio 打开项目根目录
+2. Web 文件位于 `src/main/assets/`
+3. WebView Activity 位于 `src/main/java/com/labtrace/app/MainActivity.java`
+4. 构建指南详见 `docs/guides/BUILD_GUIDE.md`
 
 ### 3. 数据导入
 
@@ -146,6 +141,27 @@ class MainActivity : AppCompatActivity() {
 - 使用 IndexedDB 持久化 SQLite 数据库
 - PDF 文件缓存在内存中（File API）
 - 支持离线使用
+
+## 开发与测试
+
+```bash
+# 安装依赖
+npm install
+
+# 运行全部测试
+npm test
+
+# 运行指定测试
+npm run test:database     # 数据库模块
+npm run test:app          # 应用逻辑
+npm run test:integration  # 集成测试
+
+# 覆盖率报告
+npm run test:coverage
+
+# 监视模式
+npm run test:watch
+```
 
 ## 浏览器兼容性
 

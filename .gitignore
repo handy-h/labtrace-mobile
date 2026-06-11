@@ -17,6 +17,7 @@ gradle/gradle-daemon-jvm.properties
 
 # ── Android APK / AAB ───────────────────────────────
 output/
+release/
 *.apk
 *.aab
 *.ap_
@@ -53,6 +54,12 @@ ehthumbs.db
 # ── Logs ────────────────────────────────────────────
 *.log
 *.trace
+
+# ── Test Coverage ──────────────────────────────────
+coverage/
+
+# ── Build Artifacts (root) ─────────────────────────
+/labtrace-mobile
 
 # ── Task artifacts (agent workflow files) ───────────
 task-summary_*.md

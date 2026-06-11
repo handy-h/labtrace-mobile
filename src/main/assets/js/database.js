@@ -220,6 +220,7 @@ class LabtraceDB {
         if (!this.db) throw new Error('Database not initialized');
         try {
             const stmt = this.db.prepare(sql);
+            stmt.bind(params);
             const result = [];
             while (stmt.step()) {
                 result.push(stmt.getAsObject());

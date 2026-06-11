@@ -188,6 +188,7 @@ describe('LabtraceDB', () => {
             const result = db.query('SELECT * FROM test');
 
             expect(mockDb.prepare).toHaveBeenCalledWith('SELECT * FROM test');
+            expect(mockStmt.bind).toHaveBeenCalledWith([]);
             expect(mockStmt.step).toHaveBeenCalledTimes(3);
             expect(mockStmt.free).toHaveBeenCalled();
             expect(result).toEqual(mockResults);
@@ -200,6 +201,7 @@ describe('LabtraceDB', () => {
             db.query('SELECT * FROM test WHERE id = ?', [1]);
 
             expect(mockDb.prepare).toHaveBeenCalledWith('SELECT * FROM test WHERE id = ?');
+            expect(mockStmt.bind).toHaveBeenCalledWith([1]);
         });
 
         test('should throw error on query failure', () => {
