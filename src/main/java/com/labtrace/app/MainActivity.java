@@ -1,9 +1,7 @@
 package com.labtrace.app;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,8 +11,6 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -30,7 +26,7 @@ public class MainActivity extends Activity {
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
     private static final int FILE_CHOOSER_REQUEST_CODE = 1;
-    private static final int PERMISSION_REQUEST_CODE = 2;
+    private static final long MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB 文件大小上限
     
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -49,8 +45,8 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         
-        // Enable debugging in WebView (for development)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+        // 仅在 Debug 构建中启用 WebView 调试
+        if (BuildConfig.DEBUG && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
         
@@ -81,30 +77,47 @@ public class MainActivity extends Activity {
         // Load the web app
         webView.loadUrl("file:///android_asset/index.html");
         
-        // Request permissions
-        checkPermissions();
+        // 恢复 WebView 状态
+        if (savedInstanceState != null) {
+            webView.restoreState(savedInstanceState);
+        }
     }
     
-    private void checkPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            String[] permissions = {
-                Manifest.permission.READ_EXTERNAL_STORAGE,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            };
-            
-            boolean needRequest = false;
-            for (String permission : permissions) {
-                if (ContextCompat.checkSelfPermission(this, permission) 
-                        != PackageManager.PERMISSION_GRANTED) {
-                    needRequest = true;
-                    break;
-                }
-            }
-            
-            if (needRequest) {
-                ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQUEST_CODE);
-            }
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (webView != null) {
+            webView.saveState(outState);
         }
+    }
+    
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (webView != null) {
+            webView.onPause();
+        }
+    }
+    
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.onResume();
+        }
+    }
+    
+    @Override
+    protected void onDestroy() {
+        if (webView != null) {
+            webView.loadUrl("about:blank");
+            webView.stopLoading();
+            webView.setWebChromeClient(null);
+            webView.setWebViewClient(null);
+            webView.destroy();
+            webView = null;
+        }
+        super.onDestroy();
     }
     
     @Override
@@ -135,7 +148,7 @@ public class MainActivity extends Activity {
     
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
+        if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
             super.onBackPressed();
@@ -153,6 +166,14 @@ public class MainActivity extends Activity {
                 Uri uri = Uri.parse(uriString);
                 InputStream inputStream = getContentResolver().openInputStream(uri);
                 if (inputStream == null) return null;
+                
+                // 检查文件大小，防止 OOM
+                long size = getContentResolver().openFileDescriptor(uri, "r")
+                        .getStatSize();
+                if (size > MAX_FILE_SIZE) {
+                    inputStream.close();
+                    return null;
+                }
                 
                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
                 byte[] buffer = new byte[4096];
@@ -177,7 +198,7 @@ public class MainActivity extends Activity {
             try {
                 return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
             } catch (PackageManager.NameNotFoundException e) {
-                return "1.0.0";
+                return BuildConfig.VERSION_NAME;
             }
         }
         

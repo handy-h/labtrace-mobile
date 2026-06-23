@@ -40,10 +40,10 @@ const setupApp = () => {
         'search-input', 'search-date-from', 'search-date-to', 'search-results',
         'stats-subject', 'stats-overview', 'stats-abnormal',
         'reports-list', 'report-title', 'report-detail',
-        'pdf-viewer', 'pdf-title',
-        'import-modal', 'import-status', 'import-db', 'import-pdfs',
+        'pdf-viewer', 'pdf-title', 'img-viewer', 'file-viewer-container',
+        'import-modal', 'import-status', 'import-db', 'import-pdfs', 'import-backup',
         'report-modal', 'pdf-modal',
-        'btn-import', 'btn-confirm-import', 'btn-search', 'btn-settings',
+        'btn-import', 'btn-confirm-import', 'btn-export-backup', 'btn-search', 'btn-settings',
         'trend-chart',
     ];
 
@@ -541,19 +541,45 @@ describe('LabtraceApp', () => {
     });
 
     describe('viewPDF', () => {
-        test('should use cached PDF file', () => {
+        test('should use cached PDF file', async () => {
             const mockFile = { name: 'test.pdf', size: 1024 };
             app.pdfFiles.set('test.pdf', mockFile);
+            db.getFile = jest.fn(() => Promise.resolve(null));
 
-            app.viewPDF('/path/to/test.pdf');
+            await app.viewPDF('/path/to/test.pdf');
 
             expect(mockElements['pdf-viewer'].src).toBe('blob:test-url');
         });
 
-        test('should fallback to file path when not cached', () => {
-            app.viewPDF('/path/to/remote.pdf');
+        test('should fallback to file path when not cached', async () => {
+            db.getFile = jest.fn(() => Promise.resolve(null));
+            await app.viewPDF('/path/to/remote.pdf');
 
             expect(mockElements['pdf-viewer'].src).toBe('/path/to/remote.pdf');
+        });
+
+        test('should use IndexedDB stored file when available', async () => {
+            const storedData = new Uint8Array([1, 2, 3]);
+            db.getFile = jest.fn(() => Promise.resolve(storedData));
+
+            await app.viewPDF('/path/to/stored.pdf');
+
+            // Should have called getFile with the filename
+            expect(db.getFile).toHaveBeenCalledWith('stored.pdf');
+            // pdf-viewer src should be set (blob URL)
+            expect(mockElements['pdf-viewer'].src).toBeTruthy();
+        });
+
+        test('should display image file correctly', async () => {
+            const storedData = new Uint8Array([1, 2, 3]);
+            db.getFile = jest.fn(() => Promise.resolve(storedData));
+
+            await app.viewPDF('/path/to/image.png');
+
+            expect(db.getFile).toHaveBeenCalledWith('image.png');
+            expect(mockElements['img-viewer'].src).toBeTruthy();
+            expect(mockElements['img-viewer'].style.display).toBe('block');
+            expect(mockElements['pdf-viewer'].style.display).toBe('none');
         });
     });
 
@@ -745,6 +771,7 @@ describe('LabtraceApp', () => {
         test('should show error when no files selected', async () => {
             mockElements['import-db'].files = [];
             mockElements['import-pdfs'].files = [];
+            mockElements['import-backup'].files = [];
 
             await app.handleImport();
 
@@ -757,23 +784,44 @@ describe('LabtraceApp', () => {
             const pdfFile = { name: 'test.pdf', size: 2048 };
             mockElements['import-db'].files = [dbFile];
             mockElements['import-pdfs'].files = [pdfFile];
+            mockElements['import-backup'].files = [];
 
             // Mock the importDatabase method on db
             db.importDatabase = jest.fn(() => Promise.resolve(true));
+            db.deleteAllFiles = jest.fn(() => Promise.resolve(true));
             db.saveToStorage = jest.fn(() => Promise.resolve());
+            db.saveFilesBatch = jest.fn(() => Promise.resolve(1));
 
             await app.handleImport();
 
             expect(db.importDatabase).toHaveBeenCalledWith(dbFile);
+            expect(db.deleteAllFiles).toHaveBeenCalled();
             expect(app.pdfFiles.has('test.pdf')).toBe(true);
             expect(db.saveToStorage).toHaveBeenCalled();
             expect(mockElements['import-status'].className).toBe('success');
+        });
+
+        test('should import backup zip file', async () => {
+            const zipFile = { name: 'backup.zip', size: 50000 };
+            mockElements['import-backup'].files = [zipFile];
+            mockElements['import-db'].files = [];
+            mockElements['import-pdfs'].files = [];
+
+            db.importFromBackup = jest.fn(() => Promise.resolve({ dbImported: true, fileCount: 10 }));
+            db.saveToStorage = jest.fn(() => Promise.resolve());
+
+            await app.handleImport();
+
+            expect(db.importFromBackup).toHaveBeenCalledWith(zipFile, expect.any(Function));
+            expect(mockElements['import-status'].className).toBe('success');
+            expect(mockElements['import-status'].textContent).toContain('10');
         });
 
         test('should handle import error', async () => {
             const dbFile = { name: 'labtrace.db', size: 1024 };
             mockElements['import-db'].files = [dbFile];
             mockElements['import-pdfs'].files = [];
+            mockElements['import-backup'].files = [];
             
             db.importDatabase = jest.fn(() => Promise.reject(new Error('Invalid database')));
 

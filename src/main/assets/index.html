@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="css/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
     <div id="app">
@@ -93,33 +94,42 @@
             </div>
             <div class="modal-body">
                 <div class="import-section">
-                    <h4>1. 导入数据库 (labtrace.db)</h4>
-                    <input type="file" id="import-db" accept="*/*" capture="environment">
-                    <p class="hint">选择 SQLite 数据库文件（.db / .sqlite），将覆盖现有数据</p>
+                    <h4>📦 从备份文件恢复</h4>
+                    <input type="file" id="import-backup" accept=".zip">
+                    <p class="hint">选择备份压缩包（.zip），将恢复数据库及所有关联的 PDF / 图片文件</p>
                 </div>
-                <div class="import-section">
-                    <h4>2. 导入 PDF 文件</h4>
-                    <input type="file" id="import-pdfs" accept=".pdf" multiple>
-                    <p class="hint">选择检查单 PDF 文件（可选，可多选）</p>
+                <div class="import-section" style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+                    <h4>📄 高级：单独导入</h4>
+                    <div style="margin-bottom:8px">
+                        <label>数据库文件：</label>
+                        <input type="file" id="import-db" accept="*/*" capture="environment">
+                    </div>
+                    <div>
+                        <label>PDF 文件：</label>
+                        <input type="file" id="import-pdfs" accept=".pdf,.png,.jpg,.jpeg" multiple>
+                    </div>
+                    <p class="hint">选择 SQLite 数据库文件（将覆盖现有数据），可选附加 PDF/图片</p>
                 </div>
                 <div id="import-status"></div>
             </div>
             <div class="modal-footer">
+                <button id="btn-export-backup" class="btn-secondary">📤 导出备份</button>
                 <button id="btn-confirm-import" class="btn-primary">确认导入</button>
                 <button class="btn-secondary close-btn">取消</button>
             </div>
         </div>
     </div>
 
-    <!-- PDF 查看弹窗 -->
+    <!-- PDF/图片 查看弹窗 -->
     <div id="pdf-modal" class="modal">
         <div class="modal-content modal-large">
             <div class="modal-header">
                 <h3 id="pdf-title">检查单</h3>
                 <button class="close-btn">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body" id="file-viewer-container">
                 <iframe id="pdf-viewer" frameborder="0"></iframe>
+                <img id="img-viewer" style="display:none" alt="检查单图片">
             </div>
         </div>
     </div>

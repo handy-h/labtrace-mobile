@@ -61,5 +61,8 @@ coverage/
 # ── Build Artifacts (root) ─────────────────────────
 /labtrace-mobile
 
+# ── Backup / Data files ─────────────────────────────
+*.zip
+
 # ── Task artifacts (agent workflow files) ───────────
 task-summary_*.md

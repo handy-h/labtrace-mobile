@@ -493,6 +493,21 @@ body {
     min-height: 70vh;
 }
 
+#img-viewer {
+    max-width: 100%;
+    max-height: 75vh;
+    display: block;
+    margin: 0 auto;
+    object-fit: contain;
+}
+
+#file-viewer-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+}
+
 /* Report Detail */
 .report-section {
     margin-bottom: 20px;

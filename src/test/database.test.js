@@ -562,6 +562,7 @@ describe('LabtraceDB', () => {
             };
             const mockIdbDb = {
                 transaction: jest.fn(() => mockTx),
+                close: jest.fn(),
             };
             const mockRequest = {
                 onerror: null,

@@ -9,6 +9,7 @@ class LabtraceDB {
         this.SQL = null;
         this.initialized = false;
         this.dbName = 'labtrace.db';
+        this._saveTimer = null; // 防抖定时器
     }
 
     async init() {
@@ -140,24 +141,47 @@ class LabtraceDB {
         this.db.run(schema);
     }
 
+    /**
+     * 打开 IndexedDB（v2），包含 database 和 files 两个 object store
+     * @returns {Promise<IDBDatabase>}
+     */
+    openIDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open('LabtraceDB', 2);
+            request.onupgradeneeded = (event) => {
+                const idb = event.target.result;
+                if (!idb.objectStoreNames.contains('database')) {
+                    idb.createObjectStore('database');
+                }
+                if (!idb.objectStoreNames.contains('files')) {
+                    idb.createObjectStore('files');
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
     async loadFromStorage() {
-        // Try IndexedDB first
         try {
-            const request = indexedDB.open('LabtraceDB', 1);
-            return new Promise((resolve, reject) => {
-                request.onerror = () => resolve(null);
-                request.onsuccess = (event) => {
-                    const db = event.target.result;
-                    const tx = db.transaction(['database'], 'readonly');
+            const idb = await this.openIDB();
+            return new Promise((resolve) => {
+                try {
+                    const tx = idb.transaction(['database'], 'readonly');
                     const store = tx.objectStore('database');
                     const getReq = store.get('labtrace');
-                    getReq.onsuccess = () => resolve(getReq.result ? getReq.result.data : null);
-                    getReq.onerror = () => resolve(null);
-                };
-                request.onupgradeneeded = (event) => {
-                    const db = event.target.result;
-                    db.createObjectStore('database');
-                };
+                    getReq.onsuccess = () => {
+                        idb.close();
+                        resolve(getReq.result ? getReq.result.data : null);
+                    };
+                    getReq.onerror = () => {
+                        idb.close();
+                        resolve(null);
+                    };
+                } catch (e) {
+                    idb.close();
+                    resolve(null);
+                }
             });
         } catch (e) {
             return null;
@@ -170,24 +194,32 @@ class LabtraceDB {
         const data = this.db.export();
 
         try {
-            const request = indexedDB.open('LabtraceDB', 1);
+            const idb = await this.openIDB();
             return new Promise((resolve, reject) => {
-                request.onsuccess = (event) => {
-                    const db = event.target.result;
-                    const tx = db.transaction(['database'], 'readwrite');
-                    const store = tx.objectStore('database');
-                    store.put({ data: data }, 'labtrace');
-                    tx.oncomplete = () => resolve(true);
-                    tx.onerror = () => reject(tx.error);
+                const tx = idb.transaction(['database'], 'readwrite');
+                const store = tx.objectStore('database');
+                store.put({ data: data }, 'labtrace');
+                tx.oncomplete = () => {
+                    idb.close();
+                    resolve(true);
                 };
-                request.onupgradeneeded = (event) => {
-                    const db = event.target.result;
-                    db.createObjectStore('database');
+                tx.onerror = () => {
+                    idb.close();
+                    reject(tx.error);
                 };
             });
         } catch (e) {
             console.error('Failed to save to storage:', e);
         }
+    }
+
+    /** 防抖保存：短时间内多次调用只执行一次 */
+    debouncedSave() {
+        if (this._saveTimer) clearTimeout(this._saveTimer);
+        this._saveTimer = setTimeout(() => {
+            this.saveToStorage();
+            this._saveTimer = null;
+        }, 500);
     }
 
     // Import database from file
@@ -213,6 +245,247 @@ class LabtraceDB {
     exportDatabase() {
         if (!this.db) return null;
         return this.db.export();
+    }
+
+    // ========== 文件持久化存储（IndexedDB files store） ==========
+
+    /**
+     * 保存文件到 IndexedDB files store
+     * @param {string} fileName - 文件名（不含路径前缀）
+     * @param {Uint8Array|Blob} data - 文件数据
+     */
+    async saveFile(fileName, data) {
+        const idb = await this.openIDB();
+        return new Promise((resolve, reject) => {
+            const tx = idb.transaction(['files'], 'readwrite');
+            const store = tx.objectStore('files');
+            store.put(data, fileName);
+            tx.oncomplete = () => { idb.close(); resolve(true); };
+            tx.onerror = () => { idb.close(); reject(tx.error); };
+        });
+    }
+
+    /**
+     * 批量保存文件（在一个事务中）
+     * @param {Map<string, Uint8Array>} fileMap - fileName -> data
+     * @param {function} onProgress - 进度回调 (current, total)
+     */
+    async saveFilesBatch(fileMap, onProgress) {
+        const idb = await this.openIDB();
+        return new Promise((resolve, reject) => {
+            const tx = idb.transaction(['files'], 'readwrite');
+            const store = tx.objectStore('files');
+            const entries = Array.from(fileMap.entries());
+            let completed = 0;
+
+            for (const [name, data] of entries) {
+                const req = store.put(data, name);
+                req.onsuccess = () => {
+                    completed++;
+                    if (onProgress) onProgress(completed, entries.length);
+                };
+                req.onerror = () => {
+                    console.error('保存文件失败:', name, req.error);
+                    completed++;
+                    if (onProgress) onProgress(completed, entries.length);
+                };
+            }
+
+            tx.oncomplete = () => { idb.close(); resolve(entries.length); };
+            tx.onerror = () => { idb.close(); reject(tx.error); };
+            tx.onabort = () => { idb.close(); reject(new Error('批量保存事务被中止')); };
+        });
+    }
+
+    /**
+     * 从 IndexedDB 获取文件
+     * @param {string} fileName - 文件名
+     * @returns {Promise<Uint8Array|null>}
+     */
+    async getFile(fileName) {
+        const idb = await this.openIDB();
+        return new Promise((resolve) => {
+            const tx = idb.transaction(['files'], 'readonly');
+            const store = tx.objectStore('files');
+            const req = store.get(fileName);
+            req.onsuccess = () => { idb.close(); resolve(req.result || null); };
+            req.onerror = () => { idb.close(); resolve(null); };
+        });
+    }
+
+    /**
+     * 删除所有已存储的文件
+     */
+    async deleteAllFiles() {
+        const idb = await this.openIDB();
+        return new Promise((resolve, reject) => {
+            const tx = idb.transaction(['files'], 'readwrite');
+            const store = tx.objectStore('files');
+            store.clear();
+            tx.oncomplete = () => { idb.close(); resolve(true); };
+            tx.onerror = () => { idb.close(); reject(tx.error); };
+        });
+    }
+
+    /**
+     * 获取已存储文件数量
+     */
+    async getFileCount() {
+        const idb = await this.openIDB();
+        return new Promise((resolve) => {
+            const tx = idb.transaction(['files'], 'readonly');
+            const store = tx.objectStore('files');
+            const req = store.count();
+            req.onsuccess = () => { idb.close(); resolve(req.result); };
+            req.onerror = () => { idb.close(); resolve(0); };
+        });
+    }
+
+    /**
+     * 从 file_path 中提取文件名
+     * @param {string} filePath - 如 'data/uploads/xxx_name_date.pdf'
+     * @returns {string} 文件名部分
+     */
+    extractFileName(filePath) {
+        if (!filePath) return '';
+        return filePath.split('/').pop();
+    }
+
+    // ========== 备份导入/导出 ==========
+
+    /**
+     * 从 zip 备份文件导入（数据库 + 关联文件）
+     * @param {File|ArrayBuffer} zipSource - zip 文件或 ArrayBuffer
+     * @param {function} onProgress - 进度回调 (stage, current, total)
+     *   stage: 'parsing' | 'db' | 'files' | 'done'
+     */
+    async importFromBackup(zipSource, onProgress) {
+        if (typeof JSZip === 'undefined') {
+            throw new Error('JSZip 库未加载，请检查网络连接后刷新页面');
+        }
+
+        const report = (stage, current, total) => {
+            if (onProgress) onProgress(stage, current, total);
+        };
+
+        // 1. 解析 zip
+        report('parsing', 0, 0);
+        const zip = await JSZip.loadAsync(zipSource);
+        const fileNames = Object.keys(zip.files);
+
+        // 2. 找到并导入数据库
+        report('db', 0, 0);
+        let dbFile = null;
+        for (const name of fileNames) {
+            if (name.endsWith('.db') || name.endsWith('.sqlite')) {
+                dbFile = name;
+                break;
+            }
+        }
+
+        if (!dbFile) {
+            throw new Error('备份文件中未找到数据库文件（.db / .sqlite）');
+        }
+
+        const dbData = await zip.file(dbFile).async('uint8array');
+        this.db = new this.SQL.Database(dbData);
+        await this.saveToStorage();
+        report('db', 1, 1);
+
+        // 3. 清理旧文件并保存新附件（PDF/图片）
+        await this.deleteAllFiles();
+
+        const attachments = fileNames.filter(name => {
+            const lower = name.toLowerCase();
+            return !zip.files[name].dir && (
+                lower.endsWith('.pdf') || lower.endsWith('.png') ||
+                lower.endsWith('.jpg') || lower.endsWith('.jpeg')
+            );
+        });
+
+        if (attachments.length > 0) {
+            // 分批处理，每批20个文件，避免一次性将所有文件数据加载到内存
+            const BATCH_SIZE = 20;
+            let totalProcessed = 0;
+
+            for (let i = 0; i < attachments.length; i += BATCH_SIZE) {
+                const batch = attachments.slice(i, i + BATCH_SIZE);
+                const fileMap = new Map();
+
+                for (const attName of batch) {
+                    // 取文件名部分（去掉 files/ 前缀）
+                    const baseName = attName.split('/').pop();
+                    const data = await zip.file(attName).async('uint8array');
+                    fileMap.set(baseName, data);
+                }
+
+                await this.saveFilesBatch(fileMap, (current, total) => {
+                    report('files', totalProcessed + current, attachments.length);
+                });
+
+                totalProcessed += batch.length;
+            }
+        }
+
+        report('done', attachments.length, attachments.length);
+
+        return {
+            dbImported: true,
+            fileCount: attachments.length
+        };
+    }
+
+    /**
+     * 导出备份 zip（数据库 + 所有关联文件）
+     * @param {function} onProgress - 进度回调 (current, total)
+     * @returns {Promise<Blob>} zip Blob
+     */
+    async exportBackup(onProgress) {
+        if (typeof JSZip === 'undefined') {
+            throw new Error('JSZip 库未加载，请检查网络连接后刷新页面');
+        }
+
+        const zip = new JSZip();
+
+        // 1. 导出数据库
+        const dbData = this.exportDatabase();
+        if (dbData) {
+            zip.file('labtrace.db', dbData);
+        }
+
+        // 2. 从 IndexedDB 导出所有文件
+        const idb = await this.openIDB();
+        const files = await new Promise((resolve) => {
+            const tx = idb.transaction(['files'], 'readonly');
+            const store = tx.objectStore('files');
+            const cursorReq = store.openCursor();
+            const result = [];
+            cursorReq.onsuccess = (event) => {
+                const cursor = event.target.result;
+                if (cursor) {
+                    result.push({ name: cursor.key, data: cursor.value });
+                    cursor.continue();
+                } else {
+                    idb.close();
+                    resolve(result);
+                }
+            };
+            cursorReq.onerror = () => { idb.close(); resolve([]); };
+        });
+
+        for (let i = 0; i < files.length; i++) {
+            zip.file('files/' + files[i].name, files[i].data);
+            if (onProgress) onProgress(i + 1, files.length);
+        }
+
+        // 3. 生成 zip blob
+        const blob = await zip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 6 }
+        });
+
+        return blob;
     }
 
     // Query methods
@@ -436,17 +709,30 @@ class LabtraceDB {
         const numValue = parseFloat(value);
         if (isNaN(numValue)) return 'normal';
 
-        // Parse reference interval (e.g., "65.0-85.0" or "<5.0" or ">10.0")
         const range = refText.trim();
 
-        // Range format: "min-max"
-        const rangeMatch = range.match(/^([\d.]+)\s*-\s*([\d.]+)$/);
+        // Range format: "min-max" or "min~max" or "min – max"
+        const rangeMatch = range.match(/^([\d.]+)\s*[-~–—]\s*([\d.]+)$/);
         if (rangeMatch) {
             const min = parseFloat(rangeMatch[1]);
             const max = parseFloat(rangeMatch[2]);
             if (numValue < min) return 'low';
             if (numValue > max) return 'high';
             return 'normal';
+        }
+
+        // Less than or equal: "≤max"
+        const lteMatch = range.match(/^≤\s*([\d.]+)$/);
+        if (lteMatch) {
+            const max = parseFloat(lteMatch[1]);
+            return numValue > max ? 'high' : 'normal';
+        }
+
+        // Greater than or equal: "≥min"
+        const gteMatch = range.match(/^≥\s*([\d.]+)$/);
+        if (gteMatch) {
+            const min = parseFloat(gteMatch[1]);
+            return numValue < min ? 'low' : 'normal';
         }
 
         // Less than: "<max"
@@ -461,6 +747,16 @@ class LabtraceDB {
         if (gtMatch) {
             const min = parseFloat(gtMatch[1]);
             return numValue <= min ? 'low' : 'normal';
+        }
+
+        // Range with unit: "min-max unit" e.g. "3.5-9.5 x10^9/L"
+        const rangeUnitMatch = range.match(/^([\d.]+)\s*[-~–]\s*([\d.]+)\s+/);
+        if (rangeUnitMatch) {
+            const min = parseFloat(rangeUnitMatch[1]);
+            const max = parseFloat(rangeUnitMatch[2]);
+            if (numValue < min) return 'low';
+            if (numValue > max) return 'high';
+            return 'normal';
         }
 
         return 'normal';
