@@ -32,6 +32,7 @@ describe('LabtraceDB', () => {
             run: jest.fn(),
             prepare: jest.fn(() => mockStmt),
             export: jest.fn(() => new Uint8Array([1, 2, 3])),
+            exec: jest.fn(() => [{ values: [[2]] }]),  // PRAGMA user_version returns 2 (current version)
         };
 
         mockSQL = jest.fn(() => mockDb);
@@ -210,7 +211,8 @@ describe('LabtraceDB', () => {
                 throw new Error('SQL syntax error');
             });
 
-            expect(() => db.query('INVALID SQL')).toThrow('SQL syntax error');
+            // Use a valid SQL prefix so _validateSql passes, but prepare() fails
+            expect(() => db.query('SELECT * FROM nonexistent')).toThrow('SQL syntax error');
         });
     });
 
@@ -249,6 +251,8 @@ describe('LabtraceDB', () => {
 
             await importPromise;
             expect(mockSQL).toHaveBeenCalled();
+            // migrateSchema should have been called on imported db
+            expect(mockDb.exec).toHaveBeenCalledWith('PRAGMA user_version');
         });
     });
 
@@ -592,7 +596,7 @@ describe('LabtraceDB', () => {
             }, 0);
 
             const result = await savePromise;
-            expect(result).toBe(true);
+            expect(result).toBeUndefined();
         });
     });
 

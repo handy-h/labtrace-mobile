@@ -3,20 +3,36 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <!-- Content Security Policy: restrict resource loading for XSS mitigation -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: file:;
+                   script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net;
+                   style-src 'self' 'unsafe-inline';
+                   img-src 'self' data: blob: file: https:;
+                   connect-src 'self' https://cdn.jsdelivr.net;
+                   object-src 'self' blob: data:;">
+    <meta name="referrer" content="no-referrer">
     <title>Labtrace - 检查单数据管理</title>
     <link rel="stylesheet" href="css/style.css">
+    <!-- Load libraries: CDN for development, local assets preferred for production -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
-    <div id="app">
+    <!-- Loading indicator shown until app initializes -->
+    <div id="app-loading" class="app-loading">
+        <div class="loading-spinner"></div>
+        <p>正在加载 Labtrace...</p>
+    </div>
+
+    <div id="app" style="display:none">
         <!-- 顶部导航 -->
         <header class="app-header">
             <h1>Labtrace</h1>
             <div class="header-actions">
-                <button id="btn-import" class="icon-btn" title="导入数据">📥</button>
-                <button id="btn-settings" class="icon-btn" title="设置">⚙️</button>
+                <button id="btn-import" class="icon-btn" data-action="import" title="导入数据" aria-label="导入数据">📥</button>
+                <button id="btn-settings" class="icon-btn" data-action="settings" title="设置" aria-label="设置">⚙️</button>
             </div>
         </header>
 
@@ -63,12 +79,12 @@
         <!-- 数据检索页 -->
         <div id="tab-search" class="tab-content">
             <div class="search-box">
-                <input type="text" id="search-input" placeholder="搜索指标名称、医院、日期...">
-                <button id="btn-search">搜索</button>
+                <input type="text" id="search-input" placeholder="搜索指标名称、医院、日期..." aria-label="搜索">
+                <button id="btn-search" data-action="search">搜索</button>
             </div>
             <div class="filter-bar">
-                <input type="date" id="search-date-from" placeholder="开始日期">
-                <input type="date" id="search-date-to" placeholder="结束日期">
+                <input type="date" id="search-date-from" placeholder="开始日期" aria-label="开始日期">
+                <input type="date" id="search-date-to" placeholder="结束日期" aria-label="结束日期">
             </div>
             <div id="search-results" class="card-list"></div>
         </div>
@@ -85,12 +101,19 @@
         </div>
     </div>
 
+    <!-- Noscript fallback -->
+    <noscript>
+        <div class="noscript-message">
+            <p>Labtrace 需要 JavaScript 才能运行。请在浏览器设置中启用 JavaScript。</p>
+        </div>
+    </noscript>
+
     <!-- 导入数据弹窗 -->
-    <div id="import-modal" class="modal">
+    <div id="import-modal" class="modal" role="dialog" aria-labelledby="import-modal-title">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>导入数据</h3>
-                <button class="close-btn">&times;</button>
+                <h3 id="import-modal-title">导入数据</h3>
+                <button class="close-btn" aria-label="关闭">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="import-section">
@@ -101,47 +124,68 @@
                 <div class="import-section" style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
                     <h4>📄 高级：单独导入</h4>
                     <div style="margin-bottom:8px">
-                        <label>数据库文件：</label>
-                        <input type="file" id="import-db" accept="*/*" capture="environment">
+                        <label for="import-db">数据库文件：</label>
+                        <input type="file" id="import-db" accept=".db,.sqlite">
                     </div>
                     <div>
-                        <label>PDF 文件：</label>
+                        <label for="import-pdfs">PDF 文件：</label>
                         <input type="file" id="import-pdfs" accept=".pdf,.png,.jpg,.jpeg" multiple>
                     </div>
                     <p class="hint">选择 SQLite 数据库文件（将覆盖现有数据），可选附加 PDF/图片</p>
                 </div>
-                <div id="import-status"></div>
+                <div id="import-status" role="status" aria-live="polite"></div>
             </div>
             <div class="modal-footer">
-                <button id="btn-export-backup" class="btn-secondary">📤 导出备份</button>
-                <button id="btn-confirm-import" class="btn-primary">确认导入</button>
+                <button id="btn-export-backup" class="btn-secondary" data-action="export-backup">📤 导出备份</button>
+                <button id="btn-confirm-import" class="btn-primary" data-action="confirm-import">确认导入</button>
                 <button class="btn-secondary close-btn">取消</button>
             </div>
         </div>
     </div>
 
     <!-- PDF/图片 查看弹窗 -->
-    <div id="pdf-modal" class="modal">
+    <div id="pdf-modal" class="modal" role="dialog" aria-labelledby="pdf-title">
         <div class="modal-content modal-large">
             <div class="modal-header">
                 <h3 id="pdf-title">检查单</h3>
-                <button class="close-btn">&times;</button>
+                <button class="close-btn" aria-label="关闭">&times;</button>
             </div>
             <div class="modal-body" id="file-viewer-container">
-                <iframe id="pdf-viewer" frameborder="0"></iframe>
+                <iframe id="pdf-viewer" frameborder="0" title="PDF 查看器"></iframe>
                 <img id="img-viewer" style="display:none" alt="检查单图片">
             </div>
         </div>
     </div>
 
     <!-- 报告详情弹窗 -->
-    <div id="report-modal" class="modal">
+    <div id="report-modal" class="modal" role="dialog" aria-labelledby="report-title">
         <div class="modal-content modal-large">
             <div class="modal-header">
                 <h3 id="report-title">报告详情</h3>
-                <button class="close-btn">&times;</button>
+                <button class="close-btn" aria-label="关闭">&times;</button>
             </div>
             <div class="modal-body" id="report-detail"></div>
+        </div>
+    </div>
+
+    <!-- Settings modal -->
+    <div id="settings-modal" class="modal" role="dialog" aria-labelledby="settings-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="settings-title">设置</h3>
+                <button class="close-btn" aria-label="关闭">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-section">
+                    <h4>数据管理</h4>
+                    <button class="btn btn-primary" data-action="export-backup">📤 导出备份</button>
+                </div>
+                <div class="settings-section">
+                    <h4>关于</h4>
+                    <p>Labtrace v1.0.0</p>
+                    <p class="hint">离线医疗检验数据管理工具</p>
+                </div>
+            </div>
         </div>
     </div>
 

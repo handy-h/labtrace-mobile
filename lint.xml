@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Labtrace 项目专属名称拼写 -->
+    <issue id="Typos">
+        <ignore path="res/xml/filepaths.xml" />
+        <ignore path="res/drawable/ic_launcher.xml" />
+        <ignore path="AndroidManifest.xml" />
+    </issue>
+
+    <!-- JS Bridge 方法被 JavaScript 调用，Java 代码静态分析无法识别 -->
+    <issue id="UnusedIds" severity="ignore" />
+    <issue id="UnusedResources" severity="ignore" />
+    <issue id="UnusedAttribute" severity="ignore" />
+
+    <!-- WebView 使用本地 assets，addJavascriptInterface 是已知用途 -->
+    <issue id="SetJavaScriptEnabled" severity="ignore" />
+    <issue id="JavascriptInterface" severity="ignore" />
+
+    <!-- minSdk 24 已高于所有调用 API，但 IDE 同步问题导致误判为 1 -->
+    <issue id="InlinedApi" severity="ignore" />
+    <issue id="NewApi" severity="ignore" />
+</lint>

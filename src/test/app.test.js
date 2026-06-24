@@ -616,7 +616,8 @@ describe('LabtraceApp', () => {
 
             await app.loadTrendChart();
 
-            expect(mockElements['trend-chart-container'].innerHTML).toContain('<canvas id="trend-chart"></canvas>');
+            // When no selections, app shows an empty-state prompt (not a canvas)
+            expect(mockElements['trend-chart-container'].innerHTML).toContain('请选择受检者和指标');
         });
 
         test('should show empty state when no data', async () => {
@@ -781,7 +782,11 @@ describe('LabtraceApp', () => {
 
         test('should import database and PDFs successfully', async () => {
             const dbFile = { name: 'labtrace.db', size: 1024 };
-            const pdfFile = { name: 'test.pdf', size: 2048 };
+            const pdfFile = {
+                name: 'test.pdf',
+                size: 2048,
+                arrayBuffer: jest.fn(() => Promise.resolve(new ArrayBuffer(8)))
+            };
             mockElements['import-db'].files = [dbFile];
             mockElements['import-pdfs'].files = [pdfFile];
             mockElements['import-backup'].files = [];

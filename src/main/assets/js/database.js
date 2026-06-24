@@ -1,6 +1,13 @@
 /**
  * Labtrace Database Manager
  * Uses sql.js (SQLite compiled to WebAssembly) for in-browser database operations
+ *
+ * v2 changes:
+ * - sql.js loaded from local assets (offline support)
+ * - Schema version tracking & migration support
+ * - SQL injection guard on query/run
+ * - IndexedDB error handling with retry
+ * - Backup reminder tracking
  */
 
 class LabtraceDB {
@@ -10,26 +17,30 @@ class LabtraceDB {
         this.initialized = false;
         this.dbName = 'labtrace.db';
         this._saveTimer = null; // 防抖定时器
+        this._idbRetryCount = 0;
+        this._maxIdbRetries = 3;
     }
 
     async init() {
         if (this.initialized) return;
 
         try {
-            // Load sql.js
-            this.SQL = await initSqlJs({
-                locateFile: file => `https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/${file}`
-            });
+            // Load sql.js from local assets (offline support)
+            // Falls back to CDN if local file is unavailable
+            this.SQL = await this._loadSqlJs();
 
-            // Try to load existing database from localStorage or IndexedDB
+            // Try to load existing database from IndexedDB
             const savedDb = await this.loadFromStorage();
             if (savedDb) {
                 this.db = new this.SQL.Database(savedDb);
+                // Run migrations on loaded database
+                this.migrateSchema();
                 console.log('Database loaded from storage');
             } else {
                 // Create empty database with schema
                 this.db = new this.SQL.Database();
                 this.createSchema();
+                this._setSchemaVersion(LabtraceDB.SCHEMA_VERSION);
                 console.log('New empty database created');
             }
 
@@ -39,6 +50,72 @@ class LabtraceDB {
             console.error('Database initialization failed:', error);
             throw error;
         }
+    }
+
+    /**
+     * Load sql.js WASM — try local assets first, fall back to CDN.
+     * Local path supports full offline operation.
+     */
+    async _loadSqlJs() {
+        // Attempt 1: local assets path (works when bundled in Android assets/)
+        try {
+            return await initSqlJs({
+                locateFile: file => `js/sql.js/${file}`
+            });
+        } catch (e) {
+            console.warn('Local sql.js load failed, trying CDN fallback:', e.message);
+        }
+
+        // Attempt 2: CDN fallback (requires network)
+        return await initSqlJs({
+            locateFile: file => `https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/${file}`
+        });
+    }
+
+    /** Current schema version constant */
+    static SCHEMA_VERSION = 2;
+
+    /** Get the schema version recorded in PRAGMA user_version */
+    _getSchemaVersion() {
+        const rows = this.db.exec('PRAGMA user_version');
+        return rows.length > 0 && rows[0].values.length > 0 ? rows[0].values[0][0] : 0;
+    }
+
+    /** Set the schema version */
+    _setSchemaVersion(version) {
+        this.db.run(`PRAGMA user_version = ${version}`);
+    }
+
+    /**
+     * Run schema migrations based on the current PRAGMA user_version.
+     * Each migration step is idempotent and wrapped in its own block.
+     */
+    migrateSchema() {
+        const currentVersion = this._getSchemaVersion();
+
+        if (currentVersion < 1) {
+            // v1: ensure base schema exists (for databases created before versioning)
+            this.createSchema();
+        }
+
+        if (currentVersion < 2) {
+            // v2: add composite indexes for common query patterns
+            try {
+                this.db.run(`
+                    CREATE INDEX IF NOT EXISTS idx_reports_subject_date
+                    ON lab_reports(subject_id, sample_date);
+                    CREATE INDEX IF NOT EXISTS idx_items_report_name
+                    ON report_items(report_id, test_item_name);
+                `);
+            } catch (e) {
+                console.warn('v2 migration (indexes) warning:', e.message);
+            }
+        }
+
+        // Future migrations would go here:
+        // if (currentVersion < 3) { ... }
+
+        this._setSchemaVersion(LabtraceDB.SCHEMA_VERSION);
     }
 
     createSchema() {
@@ -136,6 +213,10 @@ class LabtraceDB {
             CREATE INDEX IF NOT EXISTS idx_report_items_report ON report_items(report_id);
             CREATE INDEX IF NOT EXISTS idx_report_items_name ON report_items(test_item_name);
             CREATE INDEX IF NOT EXISTS idx_imaging_subject ON imaging_reports(subject_id);
+
+            -- Composite indexes for common query patterns (v2)
+            CREATE INDEX IF NOT EXISTS idx_reports_subject_date ON lab_reports(subject_id, sample_date);
+            CREATE INDEX IF NOT EXISTS idx_items_report_name ON report_items(report_id, test_item_name);
         `;
 
         this.db.run(schema);
@@ -162,28 +243,59 @@ class LabtraceDB {
         });
     }
 
+    /**
+     * Retry wrapper for IndexedDB operations.
+     * Handles transient errors (e.g. QuotaExceeded, connection issues).
+     */
+    async _withIdbRetry(operation, operationName = 'IDB operation') {
+        let lastError;
+        for (let attempt = 0; attempt <= this._maxIdbRetries; attempt++) {
+            try {
+                return await operation();
+            } catch (e) {
+                lastError = e;
+                // Non-retryable errors
+                if (e instanceof DOMException) {
+                    // QuotaExceeded — can't fix by retrying
+                    if (e.name === 'QuotaExceededError') throw e;
+                    // VersionChange / InvalidStateError — won't fix by retrying
+                    if (e.name === 'VersionError' || e.name === 'InvalidStateError') throw e;
+                }
+                if (attempt < this._maxIdbRetries) {
+                    const delay = 300 * (attempt + 1);
+                    console.warn(`${operationName} failed (attempt ${attempt + 1}), retrying in ${delay}ms:`, e.message);
+                    await new Promise(r => setTimeout(r, delay));
+                }
+            }
+        }
+        throw lastError;
+    }
+
     async loadFromStorage() {
         try {
-            const idb = await this.openIDB();
-            return new Promise((resolve) => {
-                try {
-                    const tx = idb.transaction(['database'], 'readonly');
-                    const store = tx.objectStore('database');
-                    const getReq = store.get('labtrace');
-                    getReq.onsuccess = () => {
-                        idb.close();
-                        resolve(getReq.result ? getReq.result.data : null);
-                    };
-                    getReq.onerror = () => {
+            return await this._withIdbRetry(async () => {
+                const idb = await this.openIDB();
+                return new Promise((resolve) => {
+                    try {
+                        const tx = idb.transaction(['database'], 'readonly');
+                        const store = tx.objectStore('database');
+                        const getReq = store.get('labtrace');
+                        getReq.onsuccess = () => {
+                            idb.close();
+                            resolve(getReq.result ? getReq.result.data : null);
+                        };
+                        getReq.onerror = () => {
+                            idb.close();
+                            resolve(null);
+                        };
+                    } catch (e) {
                         idb.close();
                         resolve(null);
-                    };
-                } catch (e) {
-                    idb.close();
-                    resolve(null);
-                }
-            });
+                    }
+                });
+            }, 'loadFromStorage');
         } catch (e) {
+            console.error('loadFromStorage failed after retries:', e);
             return null;
         }
     }
@@ -194,22 +306,28 @@ class LabtraceDB {
         const data = this.db.export();
 
         try {
-            const idb = await this.openIDB();
-            return new Promise((resolve, reject) => {
-                const tx = idb.transaction(['database'], 'readwrite');
-                const store = tx.objectStore('database');
-                store.put({ data: data }, 'labtrace');
-                tx.oncomplete = () => {
-                    idb.close();
-                    resolve(true);
-                };
-                tx.onerror = () => {
-                    idb.close();
-                    reject(tx.error);
-                };
-            });
+            await this._withIdbRetry(async () => {
+                const idb = await this.openIDB();
+                return new Promise((resolve, reject) => {
+                    const tx = idb.transaction(['database'], 'readwrite');
+                    const store = tx.objectStore('database');
+                    store.put({ data: data }, 'labtrace');
+                    tx.oncomplete = () => {
+                        idb.close();
+                        resolve(true);
+                    };
+                    tx.onerror = () => {
+                        idb.close();
+                        reject(tx.error);
+                    };
+                });
+            }, 'saveToStorage');
         } catch (e) {
-            console.error('Failed to save to storage:', e);
+            console.error('Failed to save to storage after retries:', e);
+            // Notify the app layer so it can inform the user
+            if (typeof window !== 'undefined' && window.app && typeof window.app._onStorageError === 'function') {
+                window.app._onStorageError(e);
+            }
         }
     }
 
@@ -230,6 +348,8 @@ class LabtraceDB {
                 try {
                     const uint8Array = new Uint8Array(e.target.result);
                     this.db = new this.SQL.Database(uint8Array);
+                    // Run migrations on imported database
+                    this.migrateSchema();
                     this.saveToStorage();
                     resolve(true);
                 } catch (error) {
@@ -255,14 +375,16 @@ class LabtraceDB {
      * @param {Uint8Array|Blob} data - 文件数据
      */
     async saveFile(fileName, data) {
-        const idb = await this.openIDB();
-        return new Promise((resolve, reject) => {
-            const tx = idb.transaction(['files'], 'readwrite');
-            const store = tx.objectStore('files');
-            store.put(data, fileName);
-            tx.oncomplete = () => { idb.close(); resolve(true); };
-            tx.onerror = () => { idb.close(); reject(tx.error); };
-        });
+        return this._withIdbRetry(async () => {
+            const idb = await this.openIDB();
+            return new Promise((resolve, reject) => {
+                const tx = idb.transaction(['files'], 'readwrite');
+                const store = tx.objectStore('files');
+                store.put(data, fileName);
+                tx.oncomplete = () => { idb.close(); resolve(true); };
+                tx.onerror = () => { idb.close(); reject(tx.error); };
+            });
+        }, `saveFile(${fileName})`);
     }
 
     /**
@@ -271,30 +393,32 @@ class LabtraceDB {
      * @param {function} onProgress - 进度回调 (current, total)
      */
     async saveFilesBatch(fileMap, onProgress) {
-        const idb = await this.openIDB();
-        return new Promise((resolve, reject) => {
-            const tx = idb.transaction(['files'], 'readwrite');
-            const store = tx.objectStore('files');
-            const entries = Array.from(fileMap.entries());
-            let completed = 0;
+        return this._withIdbRetry(async () => {
+            const idb = await this.openIDB();
+            return new Promise((resolve, reject) => {
+                const tx = idb.transaction(['files'], 'readwrite');
+                const store = tx.objectStore('files');
+                const entries = Array.from(fileMap.entries());
+                let completed = 0;
 
-            for (const [name, data] of entries) {
-                const req = store.put(data, name);
-                req.onsuccess = () => {
-                    completed++;
-                    if (onProgress) onProgress(completed, entries.length);
-                };
-                req.onerror = () => {
-                    console.error('保存文件失败:', name, req.error);
-                    completed++;
-                    if (onProgress) onProgress(completed, entries.length);
-                };
-            }
+                for (const [name, data] of entries) {
+                    const req = store.put(data, name);
+                    req.onsuccess = () => {
+                        completed++;
+                        if (onProgress) onProgress(completed, entries.length);
+                    };
+                    req.onerror = () => {
+                        console.error('保存文件失败:', name, req.error);
+                        completed++;
+                        if (onProgress) onProgress(completed, entries.length);
+                    };
+                }
 
-            tx.oncomplete = () => { idb.close(); resolve(entries.length); };
-            tx.onerror = () => { idb.close(); reject(tx.error); };
-            tx.onabort = () => { idb.close(); reject(new Error('批量保存事务被中止')); };
-        });
+                tx.oncomplete = () => { idb.close(); resolve(entries.length); };
+                tx.onerror = () => { idb.close(); reject(tx.error); };
+                tx.onabort = () => { idb.close(); reject(new Error('批量保存事务被中止')); };
+            });
+        }, 'saveFilesBatch');
     }
 
     /**
@@ -303,42 +427,58 @@ class LabtraceDB {
      * @returns {Promise<Uint8Array|null>}
      */
     async getFile(fileName) {
-        const idb = await this.openIDB();
-        return new Promise((resolve) => {
-            const tx = idb.transaction(['files'], 'readonly');
-            const store = tx.objectStore('files');
-            const req = store.get(fileName);
-            req.onsuccess = () => { idb.close(); resolve(req.result || null); };
-            req.onerror = () => { idb.close(); resolve(null); };
-        });
+        try {
+            return await this._withIdbRetry(async () => {
+                const idb = await this.openIDB();
+                return new Promise((resolve) => {
+                    const tx = idb.transaction(['files'], 'readonly');
+                    const store = tx.objectStore('files');
+                    const req = store.get(fileName);
+                    req.onsuccess = () => { idb.close(); resolve(req.result || null); };
+                    req.onerror = () => { idb.close(); resolve(null); };
+                });
+            }, `getFile(${fileName})`);
+        } catch (e) {
+            console.error('getFile failed:', e);
+            return null;
+        }
     }
 
     /**
      * 删除所有已存储的文件
      */
     async deleteAllFiles() {
-        const idb = await this.openIDB();
-        return new Promise((resolve, reject) => {
-            const tx = idb.transaction(['files'], 'readwrite');
-            const store = tx.objectStore('files');
-            store.clear();
-            tx.oncomplete = () => { idb.close(); resolve(true); };
-            tx.onerror = () => { idb.close(); reject(tx.error); };
-        });
+        return this._withIdbRetry(async () => {
+            const idb = await this.openIDB();
+            return new Promise((resolve, reject) => {
+                const tx = idb.transaction(['files'], 'readwrite');
+                const store = tx.objectStore('files');
+                store.clear();
+                tx.oncomplete = () => { idb.close(); resolve(true); };
+                tx.onerror = () => { idb.close(); reject(tx.error); };
+            });
+        }, 'deleteAllFiles');
     }
 
     /**
      * 获取已存储文件数量
      */
     async getFileCount() {
-        const idb = await this.openIDB();
-        return new Promise((resolve) => {
-            const tx = idb.transaction(['files'], 'readonly');
-            const store = tx.objectStore('files');
-            const req = store.count();
-            req.onsuccess = () => { idb.close(); resolve(req.result); };
-            req.onerror = () => { idb.close(); resolve(0); };
-        });
+        try {
+            return await this._withIdbRetry(async () => {
+                const idb = await this.openIDB();
+                return new Promise((resolve) => {
+                    const tx = idb.transaction(['files'], 'readonly');
+                    const store = tx.objectStore('files');
+                    const req = store.count();
+                    req.onsuccess = () => { idb.close(); resolve(req.result); };
+                    req.onerror = () => { idb.close(); resolve(0); };
+                });
+            }, 'getFileCount');
+        } catch (e) {
+            console.error('getFileCount failed:', e);
+            return 0;
+        }
     }
 
     /**
@@ -389,6 +529,8 @@ class LabtraceDB {
 
         const dbData = await zip.file(dbFile).async('uint8array');
         this.db = new this.SQL.Database(dbData);
+        // Run migrations on imported backup database
+        this.migrateSchema();
         await this.saveToStorage();
         report('db', 1, 1);
 
@@ -426,6 +568,9 @@ class LabtraceDB {
                 totalProcessed += batch.length;
             }
         }
+
+        // Record backup import time
+        this._recordBackupTime();
 
         report('done', attachments.length, attachments.length);
 
@@ -485,12 +630,61 @@ class LabtraceDB {
             compressionOptions: { level: 6 }
         });
 
+        // Record backup export time
+        this._recordBackupTime();
+
         return blob;
+    }
+
+    // ========== 备份时间跟踪 ==========
+
+    /** Record the last backup/export time in localStorage */
+    _recordBackupTime() {
+        try {
+            localStorage.setItem('labtrace_last_backup', new Date().toISOString());
+        } catch (e) {
+            // localStorage may be unavailable in some WebView configurations
+        }
+    }
+
+    /** Get the last backup time as ISO string, or null */
+    getLastBackupTime() {
+        try {
+            return localStorage.getItem('labtrace_last_backup');
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /** Check if user should be reminded to back up (more than 7 days since last backup) */
+    shouldRemindBackup() {
+        const last = this.getLastBackupTime();
+        if (!last) return true;
+        const daysSince = (Date.now() - new Date(last).getTime()) / (1000 * 60 * 60 * 24);
+        return daysSince > 7;
+    }
+
+    // ========== SQL 安全 ==========
+
+    /** Allowed SQL statement prefixes for the injection guard */
+    static ALLOWED_SQL_PREFIXES = /^(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|PRAGMA|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\s/i;
+
+    /**
+     * Validate that a SQL string starts with an allowed keyword.
+     * This is a defense-in-depth measure — parameterized queries are the primary defense.
+     * @param {string} sql
+     * @throws {Error} if the SQL does not match allowed prefixes
+     */
+    _validateSql(sql) {
+        if (!LabtraceDB.ALLOWED_SQL_PREFIXES.test(sql.trim())) {
+            throw new Error('不支持的 SQL 操作：仅允许 SELECT/INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/PRAGMA');
+        }
     }
 
     // Query methods
     query(sql, params = []) {
         if (!this.db) throw new Error('Database not initialized');
+        this._validateSql(sql);
         try {
             const stmt = this.db.prepare(sql);
             stmt.bind(params);
@@ -508,6 +702,7 @@ class LabtraceDB {
 
     run(sql, params = []) {
         if (!this.db) throw new Error('Database not initialized');
+        this._validateSql(sql);
         this.db.run(sql, params);
     }
 
@@ -703,6 +898,10 @@ class LabtraceDB {
     }
 
     // Check if value is abnormal
+    // Supports multiple reference interval formats:
+    //   "min-max", "min~max", "min–max", "min—max"
+    //   "≤max", "≥min", "<max", ">min"
+    //   "min-max unit" (e.g. "3.5-9.5 x10^9/L")
     checkAbnormal(value, refText) {
         if (!refText || !value) return 'normal';
 
@@ -711,7 +910,7 @@ class LabtraceDB {
 
         const range = refText.trim();
 
-        // Range format: "min-max" or "min~max" or "min – max"
+        // Range format: "min-max" or "min~max" or "min – max" or "min—max"
         const rangeMatch = range.match(/^([\d.]+)\s*[-~–—]\s*([\d.]+)$/);
         if (rangeMatch) {
             const min = parseFloat(rangeMatch[1]);

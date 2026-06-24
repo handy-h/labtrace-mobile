@@ -4,12 +4,10 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
     <!-- Blue background circle -->
     <path
         android:fillColor="#1A73E8"
         android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
-
     <!-- White "L" letter for Labtrace -->
     <path
         android:fillColor="#FFFFFF"

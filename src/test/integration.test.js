@@ -42,6 +42,7 @@ describe('Integration Tests', () => {
             run: jest.fn(),
             prepare: jest.fn(() => mockStmt),
             export: jest.fn(() => new Uint8Array([1, 2, 3])),
+            exec: jest.fn(() => [{ values: [[2]] }]),  // PRAGMA user_version returns 2 (current version)
         };
 
         mockSQL = jest.fn(() => mockDb);
