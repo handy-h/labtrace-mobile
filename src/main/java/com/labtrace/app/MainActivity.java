@@ -10,8 +10,11 @@ import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -85,6 +88,42 @@ public class MainActivity extends Activity {
         }
 
         webView.addJavascriptInterface(new LabtraceInterface(), "Android");
+
+        // Intercept requests to local assets to serve them from Java side.
+        // This is needed because setAllowFileAccessFromFileURLs(false) blocks
+        // fetch()/XHR from file:// URLs, which sql.js needs to load .wasm files.
+        webView.setWebViewClient(new WebViewClient() {
+            @Nullable
+            @Override
+            public WebResourceResponse shouldInterceptRequest(
+                    @NonNull WebView view,
+                    @NonNull WebResourceRequest request) {
+                String url = request.getUrl().toString();
+                if (!url.startsWith("file:///android_asset/")) {
+                    return null;
+                }
+
+                String assetPath = url.substring("file:///android_asset/".length());
+                if (assetPath.isEmpty() || assetPath.contains("..") || assetPath.startsWith("/")) {
+                    return null;
+                }
+
+                // Only serve specific binary/resource files that fetch() can't load
+                if (!assetPath.endsWith(".wasm") && !assetPath.endsWith(".mem")) {
+                    return null;
+                }
+
+                try {
+                    InputStream is = getAssets().open(assetPath);
+                    // Binary files must not have a charset; pass null to avoid
+                    // WebView attempting UTF-8 decoding of binary data.
+                    return new WebResourceResponse("application/wasm", null, is);
+                } catch (Exception e) {
+                    Log.w(TAG, "shouldInterceptRequest: failed to serve " + assetPath, e);
+                    return null;
+                }
+            }
+        });
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
