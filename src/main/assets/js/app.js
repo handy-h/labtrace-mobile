@@ -754,6 +754,28 @@ class LabtraceApp {
                 });
             }
 
+            if (typeof Chart === 'undefined') {
+                if (container) {
+                    container.innerHTML = '<div class="empty-state"><p>图表库加载中...</p></div>';
+                }
+                // Retry after Chart.js loads (defer scripts finish before DOMContentLoaded,
+                // but on slow networks it may take a moment)
+                let retries = 0;
+                const retryTimer = setInterval(() => {
+                    retries++;
+                    if (typeof Chart !== 'undefined') {
+                        clearInterval(retryTimer);
+                        this.renderTrendChart();
+                    } else if (retries >= 50) { // 5s max
+                        clearInterval(retryTimer);
+                        if (container) {
+                            container.innerHTML = '<div class="empty-state"><p>图表库加载失败，请检查网络后刷新页面</p></div>';
+                        }
+                    }
+                }, 100);
+                return;
+            }
+
             this.chartInstance = new Chart(canvas, {
                 type: 'line',
                 data: {
@@ -1133,8 +1155,31 @@ class LabtraceApp {
     }
 }
 
+// Safety: hide loading overlay after 10s timeout even if init didn't complete
+let initDone = false;
+setTimeout(() => {
+    if (initDone) return;
+    const loadingEl = document.getElementById('app-loading');
+    if (loadingEl) {
+        loadingEl.style.display = 'none';
+    }
+    const appEl = document.getElementById('app');
+    if (appEl) {
+        appEl.innerHTML = '<div class="init-message timeout"><h2>加载超时</h2><p>应用初始化超时，请检查网络连接后刷新页面</p></div>';
+        appEl.style.display = '';
+    }
+}, 10000);
+
 // Initialize app when DOM is ready
 document.addEventListener('DOMContentLoaded', async () => {
+    const loadingEl = document.getElementById('app-loading');
+    const appEl = document.getElementById('app');
+
+    const hideLoading = () => {
+        if (loadingEl) loadingEl.style.display = 'none';
+        if (appEl) appEl.style.display = '';
+    };
+
     try {
         await labtraceDB.init();
         const app = new LabtraceApp();
@@ -1144,16 +1189,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         await app.loadFilterOptions();
         app.loadReports();
 
+        // Hide loading overlay and show the app
+        hideLoading();
+        initDone = true;
+
         // Check backup reminder (non-blocking)
         setTimeout(() => app.checkBackupReminder(), 2000);
     } catch (error) {
-        // Fatal initialization error — show to user
-        document.body.innerHTML = `
-            <div style="padding:20px;text-align:center;color:#dc2626;">
-                <h2>应用初始化失败</h2>
-                <p>${error.message || '未知错误'}</p>
-                <p style="color:#666;">请刷新页面重试，或检查浏览器控制台获取详细信息</p>
-            </div>
-        `;
+        // Fatal initialization error — hide loading, show error
+        hideLoading();
+        initDone = true;
+        if (appEl) {
+            appEl.innerHTML = `
+                <div class="init-message error">
+                    <h2>应用初始化失败</h2>
+                    <p>${error.message || '未知错误'}</p>
+                    <p>请刷新页面重试，或检查浏览器控制台获取详细信息</p>
+                </div>
+            `;
+        }
     }
 });

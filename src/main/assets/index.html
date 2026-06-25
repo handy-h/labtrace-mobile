@@ -14,10 +14,13 @@
     <meta name="referrer" content="no-referrer">
     <title>Labtrace - 检查单数据管理</title>
     <link rel="stylesheet" href="css/style.css">
-    <!-- Load libraries: CDN for development, local assets preferred for production -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <!-- Load libraries: local assets for offline, CDN as fallback -->
+    <!-- sql.js: local first, CDN fallback via document.write -->
+    <script src="js/sql.js/sql-wasm.js"></script>
+    <script>if (typeof initSqlJs === 'undefined') { document.write('<scr' + 'ipt src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"><\/scr' + 'ipt>'); }</script>
+    <!-- chart.js & JSZip: defer ensures execution before app scripts but after DOM parse -->
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
     <!-- Loading indicator shown until app initializes -->

@@ -724,6 +724,28 @@ body {
     color: var(--text-secondary);
 }
 
+/* Init timeout/error messages (shown when app fails to start) */
+.init-message {
+    padding: 20px;
+    text-align: center;
+}
+
+.init-message h2 {
+    margin-bottom: 8px;
+}
+
+.init-message.timeout {
+    color: var(--warning);
+}
+
+.init-message.error {
+    color: var(--danger);
+}
+
+.init-message p {
+    color: var(--text-secondary);
+}
+
 /* Noscript */
 .noscript-message {
     padding: 40px 20px;

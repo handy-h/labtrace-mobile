@@ -500,8 +500,15 @@ class LabtraceDB {
      *   stage: 'parsing' | 'db' | 'files' | 'done'
      */
     async importFromBackup(zipSource, onProgress) {
+        // Guard: ensure JSZip loaded before attempting import
         if (typeof JSZip === 'undefined') {
-            throw new Error('JSZip 库未加载，请检查网络连接后刷新页面');
+            const deadline = Date.now() + 10000;
+            while (typeof JSZip === 'undefined' && Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+        if (typeof JSZip === 'undefined') {
+            throw new Error('JSZip 库加载超时，请检查网络连接后刷新页面');
         }
 
         const report = (stage, current, total) => {
@@ -586,8 +593,15 @@ class LabtraceDB {
      * @returns {Promise<Blob>} zip Blob
      */
     async exportBackup(onProgress) {
+        // Guard: ensure JSZip loaded before attempting export
         if (typeof JSZip === 'undefined') {
-            throw new Error('JSZip 库未加载，请检查网络连接后刷新页面');
+            const deadline = Date.now() + 10000;
+            while (typeof JSZip === 'undefined' && Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+        }
+        if (typeof JSZip === 'undefined') {
+            throw new Error('JSZip 库加载超时，请检查网络连接后刷新页面');
         }
 
         const zip = new JSZip();
