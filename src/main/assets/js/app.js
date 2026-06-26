@@ -181,6 +181,21 @@ class LabtraceApp {
         }, 5000);
     }
 
+    _showSuccessToast(message) {
+        let toast = document.getElementById('success-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'success-toast';
+            toast.className = 'success-toast';
+            document.body.appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.classList.add('show');
+        setTimeout(() => {
+            toast.classList.remove('show');
+        }, 5000);
+    }
+
     /** Called by database layer when storage save fails */
     _onStorageError(error) {
         if (error && error.name === 'QuotaExceededError') {
@@ -1005,10 +1020,9 @@ class LabtraceApp {
                 // Clear file inputs
                 if (backupInput) backupInput.value = '';
 
-                if (statusEl) {
-                    statusEl.textContent = `导入成功：数据库已更新，${result.fileCount} 个文件已导入`;
-                    statusEl.className = 'success';
-                }
+                // Close modal and show toast notification (statusEl no longer visible after close)
+                this.closeAllModals();
+                this._showSuccessToast(`导入成功：${result.fileCount} 个文件已导入`);
 
                 // Reload data
                 await this.loadFilterOptions();
@@ -1061,13 +1075,13 @@ class LabtraceApp {
             if (dbInput) dbInput.value = '';
             if (pdfInput) pdfInput.value = '';
 
-            if (statusEl) {
-                let msg = '导入成功';
-                if (dbFiles.length > 0) msg += '：数据库已更新';
-                if (pdfFiles.length > 0) msg += `，${pdfFiles.length} 个文件已导入`;
-                statusEl.textContent = msg;
-                statusEl.className = 'success';
-            }
+            let msg = '导入成功';
+            if (dbFiles.length > 0) msg += '：数据库已更新';
+            if (pdfFiles.length > 0) msg += `，${pdfFiles.length} 个文件已导入`;
+
+            // Close modal and show toast notification (statusEl no longer visible after close)
+            this.closeAllModals();
+            this._showSuccessToast(msg);
 
             // Reload data
             await this.loadFilterOptions();
@@ -1098,7 +1112,7 @@ class LabtraceApp {
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            this._showErrorToast('备份已导出'); // Reuse toast for success message
+            this._showSuccessToast('备份已导出'); // Success message for backup export
         } catch (error) {
             this._handleGlobalError(error);
             this._showErrorToast('导出失败: ' + error.message);
@@ -1114,7 +1128,7 @@ class LabtraceApp {
             const lastText = lastBackup
                 ? `上次备份：${new Date(lastBackup).toLocaleDateString()}`
                 : '尚未进行过备份';
-            this._showErrorToast(`💡 建议定期备份数据。${lastText}`);
+            this._showSuccessToast(`💡 建议定期备份数据。${lastText}`);
         }
     }
 

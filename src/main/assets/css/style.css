@@ -792,6 +792,31 @@ body {
     opacity: 1;
 }
 
+/* Success Toast */
+.success-toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--success);
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 24px;
+    font-size: 14px;
+    z-index: 3000;
+    opacity: 0;
+    transition: transform 0.3s, opacity 0.3s;
+    max-width: 90%;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    pointer-events: none;
+}
+
+.success-toast.show {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+}
+
 /* Responsive */
 @media (min-width: 768px) {
     .stats-grid {
@@ -817,6 +842,7 @@ body {
     .header-actions,
     .modal,
     .error-toast,
+    .success-toast,
     .app-loading {
         display: none !important;
     }

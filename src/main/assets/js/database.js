@@ -57,19 +57,35 @@ class LabtraceDB {
      * Local path supports full offline operation.
      */
     async _loadSqlJs() {
-        // Attempt 1: local assets path (works when bundled in Android assets/)
+        // Attempt 1: local assets path via WebViewAssetLoader
+        // WebViewAssetLoader serves assets at https://appassets.androidplatform.net/assets/
         try {
-            return await initSqlJs({
-                locateFile: file => `js/sql.js/${file}`
+            console.log('Loading sql.js WASM from local assets...');
+            const SQL = await initSqlJs({
+                locateFile: file => {
+                    const path = `/assets/js/sql.js/${file}`;
+                    console.log('sql.js locateFile:', file, '->', path);
+                    return path;
+                }
             });
+            console.log('sql.js loaded successfully from local assets');
+            return SQL;
         } catch (e) {
-            console.warn('Local sql.js load failed, trying CDN fallback:', e.message);
+            console.warn('Local sql.js load failed:', e.message);
+            console.log('Trying CDN fallback...');
         }
 
         // Attempt 2: CDN fallback (requires network)
-        return await initSqlJs({
-            locateFile: file => `https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/${file}`
-        });
+        try {
+            const SQL = await initSqlJs({
+                locateFile: file => `https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/${file}`
+            });
+            console.log('sql.js loaded successfully from CDN');
+            return SQL;
+        } catch (e) {
+            console.error('CDN sql.js load also failed:', e.message);
+            throw new Error('无法加载数据库引擎: ' + e.message);
+        }
     }
 
     /** Current schema version constant */

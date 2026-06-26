@@ -1,6 +1,6 @@
 {
   "name": "labtrace-mobile",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Labtrace Mobile - 检查单数据管理应用",
   "main": "src/main/assets/js/app.js",
   "scripts": {

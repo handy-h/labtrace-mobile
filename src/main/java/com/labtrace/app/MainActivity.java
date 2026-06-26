@@ -20,6 +20,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
+import androidx.webkit.WebViewAssetLoader;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -37,7 +38,7 @@ import java.io.InputStream;
  * <ul>
  *   <li>JS Bridge input validation (length, charset, format)</li>
  *   <li>File size limits enforced on all native read paths</li>
- *   <li>WebView client disables mixed content and file access from external URLs</li>
+ *   <li>WebViewAssetLoader serves local assets via https://appassets.androidplatform.net/</li>
  *   <li>Temp files use predictable naming and are cleaned up</li>
  * </ul>
  */
@@ -61,6 +62,7 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
+    private WebViewAssetLoader assetLoader;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -69,15 +71,21 @@ public class MainActivity extends Activity {
         webView = new WebView(this);
         setContentView(webView);
 
+        // Set up WebViewAssetLoader to serve local assets via https://appassets.androidplatform.net/
+        // This avoids file:// URL restrictions and allows fetch() to work for WASM files
+        assetLoader = new WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                .build();
+
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
-        settings.setAllowFileAccess(true);
-        settings.setAllowContentAccess(true);
         settings.setDatabaseEnabled(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
 
-        // Security: disable mixed content and prevent external file:// access
+        // Security: disable mixed content and file:// access; WebViewAssetLoader handles local assets
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
         settings.setAllowFileAccessFromFileURLs(false);
         settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setBlockNetworkLoads(false); // Need network for CDN fallback
@@ -89,39 +97,14 @@ public class MainActivity extends Activity {
 
         webView.addJavascriptInterface(new LabtraceInterface(), "Android");
 
-        // Intercept requests to local assets to serve them from Java side.
-        // This is needed because setAllowFileAccessFromFileURLs(false) blocks
-        // fetch()/XHR from file:// URLs, which sql.js needs to load .wasm files.
+        // Use WebViewAssetLoader to intercept asset requests
         webView.setWebViewClient(new WebViewClient() {
             @Nullable
             @Override
             public WebResourceResponse shouldInterceptRequest(
                     @NonNull WebView view,
                     @NonNull WebResourceRequest request) {
-                String url = request.getUrl().toString();
-                if (!url.startsWith("file:///android_asset/")) {
-                    return null;
-                }
-
-                String assetPath = url.substring("file:///android_asset/".length());
-                if (assetPath.isEmpty() || assetPath.contains("..") || assetPath.startsWith("/")) {
-                    return null;
-                }
-
-                // Only serve specific binary/resource files that fetch() can't load
-                if (!assetPath.endsWith(".wasm") && !assetPath.endsWith(".mem")) {
-                    return null;
-                }
-
-                try {
-                    InputStream is = getAssets().open(assetPath);
-                    // Binary files must not have a charset; pass null to avoid
-                    // WebView attempting UTF-8 decoding of binary data.
-                    return new WebResourceResponse("application/wasm", null, is);
-                } catch (Exception e) {
-                    Log.w(TAG, "shouldInterceptRequest: failed to serve " + assetPath, e);
-                    return null;
-                }
+                return assetLoader.shouldInterceptRequest(request.getUrl());
             }
         });
 
@@ -145,7 +128,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        webView.loadUrl("file:///android_asset/index.html");
+        // Load from WebViewAssetLoader domain instead of file://
+        webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
 
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState);
