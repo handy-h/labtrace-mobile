@@ -498,6 +498,28 @@ class LabtraceDB {
     }
 
     /**
+     * 获取所有已存储的文件名（用于调试）
+     * @returns {Promise<string[]>}
+     */
+    async getAllFileNames() {
+        try {
+            return await this._withIdbRetry(async () => {
+                const idb = await this.openIDB();
+                return new Promise((resolve) => {
+                    const tx = idb.transaction(['files'], 'readonly');
+                    const store = tx.objectStore('files');
+                    const req = store.getAllKeys();
+                    req.onsuccess = () => { idb.close(); resolve(req.result || []); };
+                    req.onerror = () => { idb.close(); resolve([]); };
+                });
+            }, 'getAllFileNames');
+        } catch (e) {
+            console.error('getAllFileNames failed:', e);
+            return [];
+        }
+    }
+
+    /**
      * 从 file_path 中提取文件名
      * @param {string} filePath - 如 'data/uploads/xxx_name_date.pdf'
      * @returns {string} 文件名部分

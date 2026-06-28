@@ -52,6 +52,16 @@ class LabtraceApp {
                 return;
             }
 
+            // View PDF / file button (check BEFORE card, so badge clicks on cards work)
+            const viewBtn = e.target.closest('[data-action="view-pdf"]');
+            if (viewBtn) {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('[click] view-pdf clicked, path:', viewBtn.dataset.path);
+                this.viewPDF(viewBtn.dataset.path);
+                return;
+            }
+
             // Report card click
             const card = e.target.closest('.card');
             if (card) {
@@ -62,14 +72,6 @@ class LabtraceApp {
                 } else if (type === 'imaging') {
                     this.showImagingDetail(id);
                 }
-                return;
-            }
-
-            // View PDF button
-            const viewBtn = e.target.closest('[data-action="view-pdf"]');
-            if (viewBtn) {
-                e.preventDefault();
-                this.viewPDF(viewBtn.dataset.path);
                 return;
             }
 
@@ -194,6 +196,47 @@ class LabtraceApp {
         setTimeout(() => {
             toast.classList.remove('show');
         }, 5000);
+    }
+
+    /**
+     * 显示调试信息弹窗（用于排查问题）
+     * @param {string} title - 标题
+     * @param {string} content - 内容
+     */
+    _showDebugModal(title, content) {
+        // 创建调试弹窗
+        let modal = document.getElementById('debug-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'debug-modal';
+            modal.className = 'modal';
+            modal.innerHTML = `
+                <div class="modal-content" style="max-width: 90%; width: 600px;">
+                    <div class="modal-header">
+                        <h3 id="debug-modal-title">调试信息</h3>
+                        <button class="close-btn" data-action="close-debug">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <pre id="debug-modal-content" style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; max-height: 400px; overflow-y: auto;"></pre>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" data-action="close-debug">关闭</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            // 绑定关闭事件
+            modal.addEventListener('click', (e) => {
+                if (e.target.dataset.action === 'close-debug' || e.target === modal) {
+                    modal.style.display = 'none';
+                }
+            });
+        }
+
+        document.getElementById('debug-modal-title').textContent = title;
+        document.getElementById('debug-modal-content').textContent = content;
+        modal.style.display = 'flex';
     }
 
     /** Called by database layer when storage save fails */
@@ -461,7 +504,13 @@ class LabtraceApp {
 
     showReportDetail(reportId) {
         try {
-            const reports = labtraceDB.query('SELECT * FROM lab_reports WHERE id = ?', [reportId]);
+            const reports = labtraceDB.query(`
+                SELECT r.*, s.name as subject_name, h.name as hospital_name
+                FROM lab_reports r
+                LEFT JOIN subjects s ON r.subject_id = s.id
+                LEFT JOIN hospitals h ON r.hospital_id = h.id
+                WHERE r.id = ?
+            `, [reportId]);
             if (reports.length === 0) {
                 this._showErrorToast('报告不存在');
                 return;
@@ -519,7 +568,13 @@ class LabtraceApp {
 
     showImagingDetail(reportId) {
         try {
-            const reports = labtraceDB.query('SELECT * FROM imaging_reports WHERE id = ?', [reportId]);
+            const reports = labtraceDB.query(`
+                SELECT ir.*, s.name as subject_name, h.name as hospital_name
+                FROM imaging_reports ir
+                LEFT JOIN subjects s ON ir.subject_id = s.id
+                LEFT JOIN hospitals h ON ir.hospital_id = h.id
+                WHERE ir.id = ?
+            `, [reportId]);
             if (reports.length === 0) {
                 this._showErrorToast('报告不存在');
                 return;
@@ -564,53 +619,168 @@ class LabtraceApp {
     // ========== PDF / Image Viewer ==========
 
     async viewPDF(filePath) {
+        console.log('[viewPDF] filePath:', filePath);
         if (!filePath) {
             this._showErrorToast('文件路径无效');
+            return;
+        }
+
+        // Defensive check: ensure labtraceDB is available
+        if (typeof labtraceDB === 'undefined' || !labtraceDB) {
+            console.error('[viewPDF] labtraceDB is undefined!');
+            this._showDebugModal('系统错误', '数据库对象未初始化 (typeof=' + typeof labtraceDB + ')，请刷新页面重试');
             return;
         }
 
         const fileName = labtraceDB.extractFileName(filePath);
         const ext = fileName.split('.').pop().toLowerCase();
         const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext);
+        console.log('[viewPDF] extracted fileName:', fileName, 'ext:', ext);
 
+        let allFiles = [];
         try {
+            // Debug: list all files in IndexedDB
+            allFiles = await labtraceDB.getAllFileNames();
+            console.log('[viewPDF] all files in IndexedDB:', allFiles);
+            console.log('[viewPDF] looking for:', fileName, 'match:', allFiles.includes(fileName));
+            // Get file data from cache or IndexedDB
+            let fileData = null;
+
             // 1. Check in-memory cache first
             if (this.pdfFiles.has(fileName)) {
-                const file = this.pdfFiles.get(fileName);
-                const blobUrl = URL.createObjectURL(file);
-                this._showViewer(blobUrl, isImage);
-                return;
+                console.log('[viewPDF] found in memory cache');
+                fileData = this.pdfFiles.get(fileName);
+            } else {
+                console.log('[viewPDF] checking IndexedDB for:', fileName);
+                fileData = await labtraceDB.getFile(fileName);
+                console.log('[viewPDF] IndexedDB result:', fileData ? 'found (' + (fileData.byteLength || fileData.size || '?') + ' bytes)' : 'null');
             }
 
-            // 2. Check IndexedDB
-            const storedData = await labtraceDB.getFile(fileName);
-            if (storedData) {
-                const blob = new Blob([storedData], { type: this._getMimeType(ext) });
+            // Try case-insensitive match if exact match failed
+            if (!fileData) {
+                const fileNameLower = fileName.toLowerCase();
+                const matchedName = allFiles.find(f => f.toLowerCase() === fileNameLower);
+                if (matchedName) {
+                    console.log('[viewPDF] case-insensitive match found:', matchedName);
+                    fileData = await labtraceDB.getFile(matchedName);
+                }
+            }
+
+            if (fileData) {
+                // For PDF files: prefer native Android viewer (WebView iframe can't render PDFs)
+                if (!isImage && typeof Android !== 'undefined' && Android.isViewFileAvailable && Android.isViewFileAvailable() === 'true') {
+                    console.log('[viewPDF] using chunked file write...');
+                    // Use a unique callback function on `this` (the app instance) rather
+                    // than overwriting `window._viewFileError`. Multiple concurrent PDF
+                    // opens would otherwise clobber each other's error handlers.
+                    // The native side calls `window._viewFileError` with a Base64-decoded
+                    // message; we route to a per-call handler via a temporary function name.
+                    const callbackName = '__viewFileError_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+                    const fileSize = (fileData.byteLength || fileData.size || '?');
+                    window[callbackName] = (errMsg) => {
+                        console.error('[viewPDF] async error from native:', errMsg);
+                        this._showDebugModal('打开PDF失败',
+                            '原生查看器错误: ' + errMsg + '\n' +
+                            '文件名: ' + fileName + '\n' +
+                            '文件大小: ' + fileSize + ' bytes');
+                        // Also fall through to the global handler for legacy callers
+                        if (typeof window._viewFileError === 'function') {
+                            try { window._viewFileError(errMsg); } catch (_) {}
+                        }
+                        delete window[callbackName];
+                    };
+                    // Tell native which callback to invoke (it calls atob() in JS).
+                    // We pass the callback name as a third argument via a temporary
+                    // global that the native side reads.
+                    window._activeViewFileCallback = callbackName;
+                    try {
+                        // Use chunked write to avoid JavaBridge argument size limit
+                        const base64Data = await this._blobToBase64(new Blob([fileData], { type: 'application/pdf' }));
+                        console.log('[viewPDF] base64 length:', base64Data.length);
+                        const startResult = Android.startFileWrite(fileName, 'application/pdf');
+                        console.log('[viewPDF] startResult:', startResult, 'type:', typeof startResult);
+                        if (typeof startResult !== 'string' || !startResult.startsWith('s')) {
+                            delete window[callbackName];
+                            delete window._activeViewFileCallback;
+                            this._showDebugModal('打开PDF失败',
+                                'startFileWrite 返回: ' + startResult + '\n' +
+                                '文件名: ' + fileName);
+                            return;
+                        }
+                        const [sessionId, mime] = startResult.split('|');
+                        console.log('[viewPDF] session:', sessionId, 'mime:', mime);
+                        // Write in 400KB chunks (safe margin under 512KB limit)
+                        const CHUNK_SIZE = 400 * 1024;
+                        let chunkError = null;
+                        for (let offset = 0; offset < base64Data.length; offset += CHUNK_SIZE) {
+                            const chunk = base64Data.substring(offset, offset + CHUNK_SIZE);
+                            const chunkResult = Android.appendFileChunk(sessionId, chunk);
+                            if (chunkResult !== 'ok') {
+                                chunkError = { offset, total: base64Data.length, chunkResult };
+                                break;
+                            }
+                        }
+                        if (chunkError) {
+                            Android.cancelFileWrite(sessionId);
+                            delete window[callbackName];
+                            delete window._activeViewFileCallback;
+                            this._showDebugModal('打开PDF失败',
+                                'appendFileChunk 错误: ' + chunkError.chunkResult + '\n' +
+                                'offset: ' + chunkError.offset + '/' + chunkError.total);
+                            return;
+                        }
+                        console.log('[viewPDF] all chunks written, finishing...');
+                        // finishFileWrite now returns 'ok' or 'error: ...' synchronously.
+                        // Asynchronous startActivity errors are reported via the callback.
+                        const finishResult = Android.finishFileWrite(sessionId, 'application/pdf');
+                        if (typeof finishResult === 'string' && finishResult.startsWith('error:')) {
+                            delete window[callbackName];
+                            delete window._activeViewFileCallback;
+                            this._showDebugModal('打开PDF失败',
+                                'finishFileWrite 错误: ' + finishResult + '\n' +
+                                '文件名: ' + fileName);
+                            return;
+                        }
+                        // Clean up the active-callback pointer; the per-call callback
+                        // is removed by the native side after invocation, or after a
+                        // 30s timeout below.
+                        delete window._activeViewFileCallback;
+                        setTimeout(() => { delete window[callbackName]; }, 30000);
+                    } catch (innerErr) {
+                        delete window[callbackName];
+                        delete window._activeViewFileCallback;
+                        throw innerErr;
+                    }
+                    return;
+                }
+
+                // For images, or when native viewer not available: use in-app viewer
+                const blob = new Blob([fileData], { type: this._getMimeType(ext) });
                 const blobUrl = URL.createObjectURL(blob);
                 this._showViewer(blobUrl, isImage);
                 return;
             }
 
-            // 3. Fallback to file path (only works for local files in WebView)
-            // Check if native viewer is available (Android)
-            if (typeof Android !== 'undefined' && Android.isViewFileAvailable && Android.isViewFileAvailable() === 'true') {
-                // Try to load file from file path and pass to native viewer
-                const response = await fetch(filePath);
-                const blob = await response.blob();
-                const base64Data = await this._blobToBase64(blob);
-                const result = Android.viewFile(base64Data, fileName, this._getMimeType(ext));
-                if (result === 'ok') return;
-            }
-
-            // 4. Last resort: use file path directly in iframe/img
-            this._showViewer(filePath, isImage);
+            // 2. File not found in cache or IndexedDB
+            const debugInfo = '文件名: ' + fileName + '\n' +
+                            'IndexedDB中的文件: ' + (allFiles.length > 0 ? allFiles.join(', ') : '(无)') + '\n' +
+                            '数据库路径: ' + filePath;
+            this._showDebugModal('文件未找到', debugInfo);
         } catch (error) {
             this._handleGlobalError(error);
-            this._showErrorToast('无法打开文件: ' + fileName);
+            const debugInfo = '文件名: ' + fileName + '\n' +
+                            '错误信息: ' + (error.message || error) + '\n' +
+                            '错误类型: ' + (error.name || 'Unknown') + '\n' +
+                            'IndexedDB中的文件: ' + (allFiles && allFiles.length > 0 ? allFiles.join(', ') : '(未能获取)') + '\n' +
+                            '数据库路径: ' + filePath;
+            this._showDebugModal('打开文件失败', debugInfo);
         }
     }
 
     _showViewer(url, isImage) {
+        // Close report detail modal first so pdf-modal is on top
+        this.closeModal('report-modal');
+
         const pdfViewer = document.getElementById('pdf-viewer');
         const imgViewer = document.getElementById('img-viewer');
         const pdfTitle = document.getElementById('pdf-title');

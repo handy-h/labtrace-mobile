@@ -27,6 +27,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Labtrace Android WebView Activity.
@@ -47,6 +48,7 @@ import java.io.InputStream;
 public class MainActivity extends Activity {
 
     private static final String TAG = "Labtrace";
+    // DEBUG flag controls WebView remote debugging. Set to false for production builds.
     private static final boolean DEBUG = false;
     private static final String VERSION_NAME = "1.0.0";
 
@@ -56,6 +58,14 @@ public class MainActivity extends Activity {
     private static final int MAX_BASE64_LENGTH = 150 * 1024 * 1024; // ~100MB binary → ~133MB base64
     private static final int MAX_FILENAME_LENGTH = 255;
     private static final int MAX_TOAST_LENGTH = 500;
+    private static final int MAX_CHUNK_LENGTH = 512 * 1024; // 512KB base64 per chunk
+    // MIME type pattern: type/subtype where each part allows alphanumerics, +, ., -
+    // Note: \- escapes the hyphen to be literal in the character class
+    private static final String MIME_TYPE_PATTERN = "^[a-zA-Z0-9.+\\-]+/[a-zA-Z0-9.+\\-]+$";
+    // Session timeout: cleanup incomplete file write sessions after 10 minutes
+    private static final long SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+    // Base64 character set (standard alphabet + padding)
+    private static final String BASE64_PATTERN = "^[A-Za-z0-9+/=]+$";
     // Allow alphanumerics, dot, underscore, hyphen, CJK chars (U+4E00–U+9FA5), and space
     private static final String ALLOWED_FILENAME_REGEX =
             "^[a-zA-Z0-9._\\-\\x{4e00}-\\x{9fa5} ]+$";
@@ -63,6 +73,41 @@ public class MainActivity extends Activity {
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
     private WebViewAssetLoader assetLoader;
+    // File write sessions: maps sessionId -> SessionInfo(file, createdAt)
+    // Using ConcurrentHashMap for thread-safe access without explicit synchronization.
+    private final ConcurrentHashMap<String, SessionInfo> fileWriteSessions = new ConcurrentHashMap<>();
+    // Monotonic counter for unique session IDs (avoids nanoTime collisions on rapid calls)
+    private static final java.util.concurrent.atomic.AtomicLong SESSION_COUNTER =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
+    /** Holds information about an active file write session. */
+    private static class SessionInfo {
+        final File file;
+        final long createdAt;
+        SessionInfo(File file) {
+            this.file = file;
+            this.createdAt = System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * Remove file write sessions older than SESSION_TIMEOUT_MS to prevent memory
+     * leaks when JS code abandons a session (e.g. crash before finishFileWrite).
+     */
+    private void cleanupExpiredSessions() {
+        long now = System.currentTimeMillis();
+        fileWriteSessions.entrySet().removeIf(entry -> {
+            SessionInfo info = entry.getValue();
+            if (now - info.createdAt > SESSION_TIMEOUT_MS) {
+                if (info.file.exists() && !info.file.delete()) {
+                    Log.w(TAG, "cleanupExpiredSessions: could not delete " + info.file.getAbsolutePath());
+                }
+                Log.d(TAG, "cleanupExpiredSessions: removed stale session " + entry.getKey());
+                return true;
+            }
+            return false;
+        });
+    }
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -382,6 +427,57 @@ public class MainActivity extends Activity {
         }
 
         /**
+         * Validate and sanitize a MIME type string. Returns "{@literal *}\/{@literal *}"
+         * if the input is null, empty, or doesn't match the allowed MIME pattern.
+         */
+        private String sanitizeMimeType(String mimeType, String callerTag) {
+            if (mimeType == null || mimeType.isEmpty()) {
+                return "*/*";
+            }
+            if (mimeType.matches(MIME_TYPE_PATTERN)) {
+                return mimeType;
+            }
+            Log.w(TAG, callerTag + ": rejected invalid mime type: " + mimeType);
+            return "*/*";
+        }
+
+        /**
+         * Encode an error message as Base64 to safely pass it to JavaScript without
+         * worrying about quotes, backslashes, newlines, or other special characters
+         * that would break string-literal construction in JS.
+         */
+        private String encodeErrorForJs(Throwable e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            return android.util.Base64.encodeToString(
+                    msg.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    android.util.Base64.NO_WRAP);
+        }
+
+        /**
+         * Report an error to the JavaScript side via evaluateJavascript().
+         * The error message is Base64-encoded and decoded in JS via atob() to
+         * safely handle any special characters.
+         *
+         * <p>If the JS side has set {@code window._activeViewFileCallback} to a
+         * per-call function name (used to avoid the legacy global handler being
+         * clobbered by concurrent PDF opens), that function is called instead.
+         * Falls back to {@code window._viewFileError} for backward compatibility.</p>
+         */
+        private void reportErrorToJs(String caller, Throwable e) {
+            if (webView == null) return;
+            final String encoded = encodeErrorForJs(e);
+            Log.e(TAG, caller + " error: " + e.getMessage(), e);
+            // The JS string looks up _activeViewFileCallback first, then falls back
+            // to _viewFileError. Single-quoted Base64 is safe in JS.
+            final String js = "(function(){"
+                    + "var cb=window._activeViewFileCallback;"
+                    + "var fn=cb?window[cb]:(window._viewFileError);"
+                    + "if(fn){fn(atob('" + encoded + "'));}"
+                    + "})();";
+            webView.post(() -> webView.evaluateJavascript(js, null));
+        }
+
+        /**
          * Write Base64-encoded file data to a temporary file and open it with the
          * system default viewer (PDF reader, image gallery, etc.).
          *
@@ -425,15 +521,7 @@ public class MainActivity extends Activity {
             }
 
             // Validate mimeTypeHint
-            String safeMime = "*/*";
-            if (mimeTypeHint != null && !mimeTypeHint.isEmpty()) {
-                // Only allow standard MIME type format: type/subtype
-                if (mimeTypeHint.matches("^[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-*]+$")) {
-                    safeMime = mimeTypeHint;
-                } else {
-                    Log.w(TAG, "viewFile: rejected invalid mime type: " + mimeTypeHint);
-                }
-            }
+            String safeMime = sanitizeMimeType(mimeTypeHint, "viewFile");
 
             try {
                 byte[] fileBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT);
@@ -450,11 +538,9 @@ public class MainActivity extends Activity {
                 }
 
                 // Create temp file in cache directory
-                File cacheDir = getExternalCacheDir();
-                if (cacheDir == null) {
-                    cacheDir = getCacheDir();
-                }
-                File tempFile = new File(cacheDir, "labtrace_view_" + System.currentTimeMillis() + ext);
+                final File cacheDir = getExternalCacheDir();
+                final File tempFile = new File(cacheDir != null ? cacheDir : getCacheDir(),
+                        "labtrace_view_" + System.currentTimeMillis() + ext);
 
                 // Write bytes to temp file
                 FileOutputStream fos = new FileOutputStream(tempFile);
@@ -463,31 +549,229 @@ public class MainActivity extends Activity {
                 fos.close();
 
                 // Use FileProvider to generate content:// URI (required on Android 7.0+)
-                Uri fileUri = FileProvider.getUriForFile(
+                final Uri fileUri = FileProvider.getUriForFile(
                         MainActivity.this,
                         getPackageName() + ".fileprovider",
                         tempFile
                 );
 
-                Intent intent = new Intent(Intent.ACTION_VIEW);
-                intent.setDataAndType(fileUri, safeMime);
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                final String finalSafeMime = safeMime;
+                final Uri finalFileUri = fileUri;
 
-                // Verify there's an app to handle this intent
-                if (intent.resolveActivity(getPackageManager()) == null) {
-                    Log.w(TAG, "viewFile: no app to handle mime type: " + safeMime);
-                    // Still try to open — some systems return null even when apps exist
-                }
+                // startActivity must be called on the UI thread.
+                // IMPORTANT: Do NOT block the JavaBridge thread with CountDownLatch —
+                // that causes a deadlock/ANR because the JavaBridge thread holds a lock
+                // that the UI thread may need. Instead, fire-and-forget on UI thread,
+                // and report errors via JS callback.
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_VIEW);
+                            intent.setDataAndType(finalFileUri, finalSafeMime);
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
 
-                startActivity(intent);
+                            if (intent.resolveActivity(getPackageManager()) == null) {
+                                Log.w(TAG, "viewFile: no app to handle mime type: " + finalSafeMime);
+                            }
 
+                            startActivity(intent);
+                            Log.d(TAG, "viewFile: startActivity succeeded");
+                        } catch (Throwable e) {
+                            // Catch Throwable (including OutOfMemoryError, SecurityException, etc.)
+                            // to prevent the WebView JavaBridge from leaking generic errors.
+                            Log.e(TAG, "viewFile UI thread error: " + e.getMessage(), e);
+                            reportErrorToJs("viewFile", e);
+                        }
+                    }
+                });
+
+                // Return immediately — don't block the JavaBridge thread
                 return "ok";
             } catch (IllegalArgumentException e) {
                 Log.e(TAG, "viewFile: invalid base64 data", e);
                 return "error: invalid file data";
-            } catch (Exception e) {
+            } catch (OutOfMemoryError e) {
+                Log.e(TAG, "viewFile: out of memory", e);
+                return "error: 文件过大，内存不足";
+            } catch (Throwable e) {
+                // Catch Throwable (including Error) so that OutOfMemoryError etc.
+                // don't leak through the WebView JavaBridge as uncaught exceptions.
                 Log.e(TAG, "viewFile error: " + e.getMessage(), e);
                 return "error: " + e.getMessage();
+            }
+        }
+
+        /**
+         * Start a chunked file write session.
+         * Creates a temp file and returns a session ID for subsequent appendChunk calls.
+         *
+         * @param fileName  Original file name (for extension/MIME detection)
+         * @param mimeType  MIME type hint (e.g. "application/pdf")
+         * @return session ID on success, or "error: ..." on failure
+         */
+        @JavascriptInterface
+        public String startFileWrite(String fileName, String mimeType) {
+            // Single try-catch wrapping the entire method body ensures any unexpected
+            // exception (e.g. PatternSyntaxException from input validation) returns
+            // a clean "error: ..." string instead of leaking through the WebView
+            // JavaBridge framework as a generic "Java exception was raised" error.
+            try {
+                if (fileName == null || fileName.isEmpty()) {
+                    return "error: empty filename";
+                }
+                if (fileName.length() > MAX_FILENAME_LENGTH) {
+                    return "error: filename too long";
+                }
+
+                String safeFileName = fileName.replaceAll("[/\\\\]", "_");
+                if (!safeFileName.matches(ALLOWED_FILENAME_REGEX)) {
+                    safeFileName = safeFileName.replaceAll("[^a-zA-Z0-9._\\-\\x{4e00}-\\x{9fa5} ]", "_");
+                }
+                if (safeFileName.isEmpty()) {
+                    safeFileName = "labtrace_file";
+                }
+
+                String safeMime = sanitizeMimeType(mimeType, "startFileWrite");
+
+                String ext = "";
+                int lastDot = safeFileName.lastIndexOf('.');
+                if (lastDot >= 0 && lastDot < safeFileName.length() - 1) {
+                    ext = safeFileName.substring(lastDot);
+                }
+
+                File cacheDir = getExternalCacheDir();
+                File tempFile = new File(cacheDir != null ? cacheDir : getCacheDir(),
+                        "labtrace_view_" + System.currentTimeMillis() + ext);
+
+                // Use System.nanoTime() + a counter to avoid potential ID collisions
+                // (original code used currentTimeMillis() + Math.random() which could
+                // collide on rapid successive calls).
+                String sessionId = "s" + System.nanoTime() + "_" + SESSION_COUNTER.incrementAndGet();
+                fileWriteSessions.put(sessionId, new SessionInfo(tempFile));
+
+                // Opportunistic cleanup: if we have too many stale sessions, prune the oldest
+                cleanupExpiredSessions();
+
+                Log.d(TAG, "startFileWrite: session=" + sessionId + " file=" + tempFile.getName() + " mime=" + safeMime);
+                return sessionId + "|" + safeMime;
+            } catch (Throwable e) {
+                // Outer catch guards against any exception (e.g. invalid regex, NPE)
+                // that would otherwise escape through the WebView JavaBridge.
+                Log.e(TAG, "startFileWrite error", e);
+                return "error: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+            }
+        }
+
+        /**
+         * Append a base64-encoded chunk to a file write session.
+         *
+         * @param sessionId  Session ID from startFileWrite
+         * @param base64Chunk  Base64-encoded data chunk (max 512KB)
+         * @return "ok" on success, or "error: ..." on failure
+         */
+        @JavascriptInterface
+        public String appendFileChunk(String sessionId, String base64Chunk) {
+            if (sessionId == null || sessionId.isEmpty()) {
+                return "error: empty session id";
+            }
+            if (base64Chunk == null || base64Chunk.isEmpty()) {
+                return "error: empty chunk";
+            }
+            if (base64Chunk.length() > MAX_CHUNK_LENGTH) {
+                return "error: chunk too large (max 512KB)";
+            }
+            // Validate base64 character set to fail fast on malformed input
+            // (avoids IllegalArgumentException from Base64.decode and protects against
+            // path-traversal-style probes).
+            if (!base64Chunk.matches(BASE64_PATTERN)) {
+                return "error: invalid base64 characters";
+            }
+
+            SessionInfo info = fileWriteSessions.get(sessionId);
+            if (info == null) {
+                return "error: invalid session";
+            }
+
+            try {
+                byte[] chunkBytes = android.util.Base64.decode(base64Chunk, android.util.Base64.DEFAULT);
+                FileOutputStream fos = new FileOutputStream(info.file, true); // append mode
+                fos.write(chunkBytes);
+                fos.flush();
+                fos.close();
+                return "ok";
+            } catch (Throwable e) {
+                Log.e(TAG, "appendFileChunk error", e);
+                return "error: " + e.getMessage();
+            }
+        }
+
+        /**
+         * Finish a chunked file write session and open the file with system viewer.
+         *
+         * @param sessionId  Session ID from startFileWrite
+         * @param mimeType   MIME type for the file
+         * @return "ok" if the file open was scheduled, or "error: ..." on synchronous
+         *         failure (invalid session, etc.). Asynchronous errors during
+         *         startActivity are reported via window._viewFileError().
+         */
+        @JavascriptInterface
+        public String finishFileWrite(String sessionId, String mimeType) {
+            if (sessionId == null || sessionId.isEmpty()) {
+                return "error: empty session id";
+            }
+
+            SessionInfo info = fileWriteSessions.remove(sessionId);
+            if (info == null) {
+                return "error: invalid session";
+            }
+
+            final String safeMime = sanitizeMimeType(mimeType, "finishFileWrite");
+            final File finalTempFile = info.file;
+
+            runOnUiThread(() -> {
+                try {
+                    Uri fileUri = FileProvider.getUriForFile(
+                            MainActivity.this,
+                            getPackageName() + ".fileprovider",
+                            finalTempFile
+                    );
+
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setDataAndType(fileUri, safeMime);
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                    if (intent.resolveActivity(getPackageManager()) == null) {
+                        Log.w(TAG, "finishFileWrite: no app to handle mime: " + safeMime);
+                    }
+
+                    startActivity(intent);
+                    Log.d(TAG, "finishFileWrite: startActivity succeeded");
+                } catch (Throwable e) {
+                    reportErrorToJs("finishFileWrite", e);
+                }
+            });
+            return "ok";
+        }
+
+        /**
+         * Debug: list all available @JavascriptInterface methods on the Android object.
+         * Used to diagnose "Java exception was raised" errors.
+         */
+        @JavascriptInterface
+        public String debugListMethods() {
+            return "isViewFileAvailable,viewFile,readFileAsBase64,getAppVersion,showToast,startFileWrite,appendFileChunk,finishFileWrite,cancelFileWrite,debugListMethods";
+        }
+
+        /**
+         * Cancel and clean up a file write session without opening the file.
+         */
+        @JavascriptInterface
+        public void cancelFileWrite(String sessionId) {
+            if (sessionId == null || sessionId.isEmpty()) return;
+            SessionInfo info = fileWriteSessions.remove(sessionId);
+            if (info != null && info.file.exists() && !info.file.delete()) {
+                Log.w(TAG, "cancelFileWrite: could not delete " + info.file.getAbsolutePath());
             }
         }
     }
